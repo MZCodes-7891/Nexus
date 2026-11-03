@@ -1,0 +1,58 @@
+{
+  "name": "nexus",
+  "version": "2.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "npm run build:helper && electron-builder",
+    "test": "node --test tests/unit.test.js",
+    "test:app": "node tests/e2e_app.js",
+    "test:live": "node tests/e2e_live.js",
+    "test:setup": "node tests/setup_check.js",
+    "build:dir": "npm run build:helper && electron-builder --dir",
+    "build:helper": "python -m PyInstaller --noconfirm --clean --log-level WARN --distpath %LOCALAPPDATA%/nexus-build/dist --workpath %LOCALAPPDATA%/nexus-build/work --specpath %LOCALAPPDATA%/nexus-build --name nexus-helper --paths . --collect-data speech_recognition --collect-all pyttsx3 --hidden-import comtypes.stream --hidden-import pyttsx3.drivers.sapi5 --exclude-module customtkinter --exclude-module openai --exclude-module tkinter --exclude-module docx nexus_helper.py"
+  },
+  "dependencies": {
+    "@composio/core": "^0.27.0",
+    "playwright-core": "^1.64.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "backend/**",
+      "frontend/**",
+      "build/icon.*",
+      "package.json"
+    ],
+    "productName": "NEXUS",
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "appId": "com.nexus.desktop",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NEXUS",
+      "runAfterFinish": true
+    },
+    "afterPack": "build/afterPack.js"
+  },
+  "description": "A personal AI assistant for Windows that runs on your own computer.",
+  "productName": "NEXUS",
+  "license": "MIT"
+}

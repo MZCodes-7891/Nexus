@@ -1,0 +1,7 @@
+# Python helpers used by the NEXUS desktop app.
+pypdf          # PDF text
+sounddevice    # microphone
+numpy          # microphone levels
+SpeechRecognition  # speech to text (sends audio to Google)
+standard-aifc  # needed by SpeechRecognition on Python 3.13 and later
+pyttsx3        # spoken replies

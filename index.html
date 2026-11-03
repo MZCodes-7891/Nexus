@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: file:; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>NEXUS</title>
+    <link rel="stylesheet" href="frontend/css/app.css">
+    <link rel="stylesheet" href="frontend/css/shell.css">
+</head>
+<body>
+    <div class="bg-glow"></div>
+
+    <nav id="sidebar" aria-label="Main navigation">
+        <div id="nav-list" class="nav-group"></div>
+        <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar"></button>
+    </nav>
+
+    <div id="main-container">
+        <header>
+            <div class="logo-area"><div class="logo-icon"></div><div class="logo-text">NEXUS</div></div>
+            <div class="topbar-left">
+                <h1 id="page-title" class="page-title">Home</h1>
+                <div class="user-greeting" id="greeting"></div>
+            </div>
+            <div class="topbar-search">
+                <input id="global-search" type="search" placeholder="Search apps, documents, tasks, chats…" aria-label="Search Nexus" autocomplete="off">
+                <div id="global-search-results" class="search-results hidden"></div>
+            </div>
+            <div class="header-actions">
+                <button id="status-ai" class="status-pill" type="button" data-nav="settings" title="AI model status"><span class="status-dot-new" data-state="busy"></span><span id="status-ai-text">Checking AI…</span></button>
+                <button id="status-apps" class="status-pill" type="button" data-nav="composio-dash" title="Connected apps"><span class="status-dot-new" data-state="busy"></span><span id="status-apps-text">Apps…</span></button>
+                <button id="notifications-button" class="icon-button" type="button" aria-label="Notifications" title="Notifications"><span id="notifications-count" class="badge hidden">0</span></button>
+                <button id="settings-shortcut" class="icon-button" type="button" data-nav="settings" aria-label="Settings" title="Settings"></button>
+                <button id="profile-button" class="profile-chip" type="button" data-nav="settings" title="Your profile"><span id="profile-initial">N</span></button>
+            </div>
+            <div id="notifications-panel" class="popover hidden" role="dialog" aria-label="Notifications"></div>
+        </header>
+
+        <div id="view-port">
+            <!-- HOME -->
+            <div id="view-home" class="view">
+                <div class="home-hero">
+                    <div class="home-hero-text">
+                        <h2 id="home-greeting">Welcome to NEXUS</h2>
+                        <p id="home-subtitle">Ask for anything. Nexus uses your apps, files, and tools, and shows you each step.</p>
+                        <form id="quick-command-form" class="quick-command">
+                            <input id="quick-command" type="text" placeholder="Try: remind me to study science tomorrow at 5 PM" aria-label="Quick command" autocomplete="off">
+                            <button class="action-btn-primary" type="submit">Ask</button>
+                        </form>
+                        <div id="home-actions" class="chip-row"></div>
+                    </div>
+                    <div class="orb-container compact"><div class="nexus-orb" data-voice-orb role="button" tabindex="0" aria-label="Hold to speak, then let go to send"></div></div>
+                </div>
+                <div id="home-grid" class="home-grid"></div>
+            </div>
+
+            <!-- AI CHAT -->
+            <div id="view-chat" class="view hidden">
+                <div class="chat-layout">
+                    <section id="projects-panel" class="projects-panel" aria-label="Saved conversations">
+                        <div class="projects-heading"><span class="nav-label">CONVERSATIONS</span><button id="new-project-button" class="new-project-button" type="button" aria-label="New conversation" title="New conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+                        <input id="projects-search" class="projects-search" type="search" placeholder="Find a conversation…" aria-label="Search conversations">
+                        <div id="project-list" class="project-list"></div>
+                        <div id="projects-empty" class="projects-empty">Your saved conversations appear here.</div>
+                    </section>
+                    <div class="chat-container">
+                        <div class="chat-history-actions">
+                            <label class="model-select-label">Model <select id="chat-model-select" aria-label="AI model"></select></label>
+                            <span id="chat-tool-mode" class="muted small"></span>
+                            <span class="spacer"></span>
+                            <span id="chat-document-scope" class="doc-scope hidden"></span>
+                            <button id="clear-current-chat-button" class="chat-clear-button" type="button" title="Clear messages from this chat">Clear this chat</button>
+                        </div>
+                        <div class="chat-messages" id="chat-box" aria-live="polite"></div>
+                        <div class="chat-input-area">
+                            <div class="chat-orb" data-voice-orb role="button" tabindex="0" aria-label="Hold to speak, then let go to send" title="Hold to speak, then let go to send"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3m-4 0h8"/></svg></div>
+                            <div class="input-wrapper"><textarea id="chat-input" rows="1" placeholder="Message Nexus…  (Shift+Enter for a new line)" aria-label="Message Nexus"></textarea></div>
+                            <button id="send-button" class="chat-btn send-button" type="button" title="Send" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+                            <button id="document-access-button" class="chat-btn" type="button" title="Attach a file" aria-label="Attach a file"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 14h8m-8 4h6"/></svg></button>
+                            <label class="spoken-toggle"><input id="spoken-response-toggle" type="checkbox"> Speak</label>
+                            <button id="stop-speaking-button" class="chat-btn" type="button" title="Stop speaking" aria-label="Stop speaking"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- MY APPS -->
+            <div id="view-apps" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>My Apps</h2><p>Your launcher. Click to open, drag to rearrange.</p></div><div class="row"><button id="apps-detect" class="integration-button secondary" type="button">Find installed apps</button><button id="apps-add" class="action-btn-primary" type="button">Add application</button></div></div>
+                <div class="toolbar"><input id="apps-search" type="search" placeholder="Search apps…" aria-label="Search apps"><select id="apps-category" aria-label="Category"></select></div>
+                <section id="apps-recent-section" class="hidden"><h3 class="section-title">Recently used</h3><div id="apps-recent" class="app-tiles small"></div></section>
+                <section id="apps-favorites-section" class="hidden"><h3 class="section-title">Favorites</h3><div id="apps-favorites" class="app-tiles small"></div></section>
+                <h3 class="section-title">All applications</h3>
+                <div id="apps-grid" class="app-tiles"></div>
+                <div id="apps-status" class="muted small" role="status"></div>
+            </div></div>
+
+            <!-- DOCUMENTS -->
+            <div id="view-docs" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Documents</h2><p>Files you add are read and indexed on this computer. Nothing is uploaded.</p></div><div class="row"><button id="docs-add-folder" class="integration-button secondary" type="button">Add a folder</button><button id="docs-add" class="action-btn-primary" type="button">Add files</button></div></div>
+                <div class="toolbar"><input id="docs-search" type="search" placeholder="Search inside your documents…" aria-label="Search documents"><select id="docs-filter" aria-label="Filter"><option value="all">All documents</option><option value="favorites">Favorites</option><option value="recent">Recently opened</option></select></div>
+                <div id="docs-progress" class="muted small" role="status"></div>
+                <div class="docs-layout">
+                    <div><div id="docs-selection-bar" class="selection-bar hidden"></div><div id="docs-list" class="doc-list"></div><details class="browser-details"><summary>Browse this computer</summary><div id="docs-browser"></div></details></div>
+                    <aside id="docs-preview" class="doc-preview"><p class="muted">Select a document to preview it, or search to see matching passages.</p></aside>
+                </div>
+                <div id="docs-selection-status" class="muted small" role="status"></div>
+            </div></div>
+
+            <!-- STUDY CENTER -->
+            <div id="view-school" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Study Center</h2><p>Your courses, materials, and a tutor that works only from what you give it.</p></div></div>
+                <div id="study-tabs" class="tabs" role="tablist"></div>
+                <div id="study-tab-sets" class="tab-panel hidden"></div>
+                <div id="study-tab-d2l" class="tab-panel hidden"></div>
+                <div id="study-tab-assignments" class="tab-panel hidden"></div>
+                <div id="study-tab-library" class="tab-panel">
+                    <section class="school-card" aria-labelledby="d2l-setup-title">
+                        <h4 id="d2l-setup-title">Connect your school</h4>
+                        <p class="muted small">Enter your Brightspace address and sign in through D2L's own page. Nexus reads what your account can see and never collects your password.</p>
+                        <div class="row wrap">
+                            <input id="d2l-school-url" class="field grow" type="url" inputmode="url" placeholder="https://school.brightspace.com" aria-label="Your school's Brightspace web address">
+                            <button id="d2l-save-url" class="integration-button" type="button">Save school link</button>
+                            <button id="d2l-open-login" class="integration-button secondary" type="button">Open D2L sign-in</button>
+                        </div>
+                        <div id="d2l-connection-status" class="muted small status-line" role="status">Your school link has not been set.</div>
+                    </section>
+                    <section class="school-card"><h4>My courses</h4><div class="row"><button id="d2l-list-courses" class="integration-button secondary" type="button">Load my courses from D2L</button></div><div id="d2l-courses" class="course-list"></div><div class="school-grid hidden"></div></section>
+                    <section class="school-card" aria-labelledby="study-tools-title">
+                        <h4 id="study-tools-title">Study library</h4>
+                        <label for="d2l-subject-select" class="muted small">Class</label>
+                        <select id="d2l-subject-select" class="field" aria-label="Study class and practice test subject"><option>English</option><option selected>Science</option><option value="Social Studies">Social</option><option>Math</option></select>
+                        <div class="row wrap" style="margin-top:12px">
+                            <button id="d2l-read-content" class="integration-button" type="button">Add the open D2L course's content</button>
+                            <button id="study-add-local-files" class="integration-button secondary" type="button">Add files from this computer</button>
+                        </div>
+                        <div id="study-local-status" class="muted small status-line" role="status">Saved locally for study.</div>
+                        <label class="muted small" style="display:block;margin-top:14px">Reading objectives (optional)</label>
+                        <div id="d2l-objective-filters" class="d2l-objective-groups"></div>
+                        <label for="d2l-topic-select" class="muted small" style="display:block;margin-top:14px">Topics and files (hold Ctrl to choose several)</label>
+                        <select id="d2l-topic-select" class="d2l-topic-select" multiple size="7" aria-label="Select study library topics and files"></select>
+                        <label for="d2l-test-instructions" class="muted small" style="display:block;margin-top:10px">Instructions for the test (optional)</label>
+                        <textarea id="d2l-test-instructions" class="field" rows="2" maxlength="1000" style="width:100%" placeholder="Focus on food webs. Make the questions harder."></textarea>
+                        <div class="row wrap"><button id="d2l-start-quiz" class="integration-button" type="button">Build 10-question practice test in chat</button><button id="d2l-clear-library" class="integration-button secondary" type="button">Clear study library</button></div>
+                        <div id="d2l-library-status" class="muted small status-line" role="status">Your study library is empty.</div>
+                        <div class="row wrap" style="margin-top:8px"><button id="d2l-record-correct" class="integration-button secondary" type="button">Record correct</button><button id="d2l-record-review" class="integration-button secondary" type="button">Record needs review</button></div>
+                        <div id="d2l-study-status" class="muted small status-line" role="status"></div>
+                        <div id="d2l-progress-chart" aria-label="Recent quiz accuracy graph"></div>
+                    </section>
+                </div>
+                <div id="study-tab-guides" class="tab-panel hidden"></div>
+                <div id="study-tab-flashcards" class="tab-panel hidden"></div>
+                <div id="study-tab-tests" class="tab-panel hidden"></div>
+                <div id="study-tab-quiz" class="tab-panel hidden"></div>
+                <div id="study-tab-planner" class="tab-panel hidden"></div>
+                <div id="study-tab-progress" class="tab-panel hidden"></div>
+            </div></div>
+
+            <!-- RESEARCH -->
+            <div id="view-research" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Research</h2><p>Nexus searches the web, reads the sources, and writes a report in which factual claims cite them.</p></div></div>
+                <form id="research-form" class="quick-command"><input id="research-question" type="text" placeholder="What do you want to find out?" aria-label="Research question"><button class="action-btn-primary" type="submit">Research</button></form>
+                <div id="research-status" class="muted small status-line" role="status"></div>
+                <div class="docs-layout"><div id="research-history" class="doc-list"></div><article id="research-report" class="doc-preview"><p class="muted">Reports you run are saved here.</p></article></div>
+                <details class="browser-details"><summary>Background browser session</summary>
+                    <p class="muted small">Opens a page in a hidden browser session that doesn't use your everyday browser or its sign-ins. AI Chat can then read that page.</p>
+                    <div class="row wrap"><input id="nexus-browser-url" class="field grow" type="url" value="https://www.google.com" aria-label="Website address"><button id="nexus-browser-open" class="integration-button" type="button">Open in background</button></div>
+                    <div id="nexus-browser-status" class="muted small status-line" role="status"></div>
+                </details>
+            </div></div>
+
+            <!-- TASKS -->
+            <div id="view-tasks" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Tasks</h2><p>Saved on this computer. Nexus can add to and update them too.</p></div><button id="organize-project-button" class="integration-button secondary" type="button">Organize my current project</button></div>
+                <form id="task-add-form" class="task-add-form wide">
+                    <input id="task-input" type="text" maxlength="180" placeholder="Add a task…" aria-label="New task">
+                    <input id="task-due" type="text" placeholder="Due (e.g. Friday 5 PM)" aria-label="Due date">
+                    <select id="task-priority" aria-label="Priority"><option value="medium">Medium</option><option value="high">High</option><option value="low">Low</option></select>
+                    <input id="task-category" type="text" placeholder="Category" aria-label="Category" maxlength="40">
+                    <button class="action-btn-primary" type="submit">Add</button>
+                </form>
+                <div id="task-list" class="task-list wide"></div>
+            </div></div>
+
+            <!-- CALENDAR -->
+            <div id="view-calendar" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2 id="calendar-title">Calendar</h2><p id="calendar-subtitle" class="muted small"></p></div><div class="row wrap"><div id="calendar-modes" class="segmented"></div><button id="calendar-prev" class="integration-button secondary" type="button" aria-label="Previous">‹</button><button id="calendar-today" class="integration-button secondary" type="button">Today</button><button id="calendar-next" class="integration-button secondary" type="button" aria-label="Next">›</button><button id="calendar-sync" class="integration-button secondary" type="button">Show Google Calendar</button><button id="calendar-add" class="action-btn-primary" type="button">Add event</button></div></div>
+                <div id="calendar-grid"></div>
+                <h3 class="section-title">Reminders</h3>
+                <form id="reminder-form" class="quick-command small"><input id="reminder-text" type="text" placeholder="Remind me to…" aria-label="Reminder"><input id="reminder-when" type="text" placeholder="tomorrow at 5 PM" aria-label="When"><select id="reminder-repeat" aria-label="Repeat"><option value="none">Once</option><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option></select><button class="action-btn-primary" type="submit">Set reminder</button></form>
+                <div id="reminder-status" class="muted small status-line" role="status"></div>
+                <div id="reminder-list" class="doc-list"></div>
+            </div></div>
+
+            <!-- AUTOMATIONS -->
+            <div id="view-automations" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Automations</h2><p>Reusable workflows. Steps still ask permission where your settings require it.</p></div><button id="automation-new" class="action-btn-primary" type="button">New automation</button></div>
+                <div id="automation-tabs" class="tabs" role="tablist"></div>
+                <div id="auto-tab-list" class="tab-panel">
+                    <form id="automation-draft-form" class="quick-command"><input id="automation-draft" type="text" placeholder="Describe it: every weekday at 4 PM, remind me to check my assignments" aria-label="Describe an automation"><button class="action-btn-primary" type="submit">Draft it</button></form>
+                    <div id="automation-status" class="muted small status-line" role="status"></div>
+                    <div id="automation-list" class="doc-list"></div>
+                </div>
+                <div id="auto-tab-history" class="tab-panel hidden"></div>
+                <div id="auto-tab-runs" class="tab-panel hidden"></div>
+                <div id="auto-tab-modes" class="tab-panel hidden">
+                    <div class="mode-grid">
+                        <section class="module-card"><span class="step-number">QUIET</span><h3>Do Not Disturb</h3><p>Toggle Windows Do Not Disturb.</p><div id="mode-dnd-state" class="mode-state mode-state-unknown" role="status" aria-live="polite">Windows Do Not Disturb: Not checked</div><button class="action-btn-primary" id="mode-dnd-button" type="button">Check / change Do Not Disturb</button></section>
+                        <section class="module-card"><span class="step-number">FOCUS</span><h3>Study</h3><p>Turn on Do Not Disturb and start a 25-minute timer. Any "When I start studying" automations run too.</p><button class="action-btn-primary" id="mode-study-button" type="button">Start Study Mode</button><div id="study-timer" class="muted small status-line" role="status">No study session running.</div><button class="integration-button secondary" id="study-timer-stop" type="button" disabled>End study session</button></section>
+                        <section class="module-card"><span class="step-number">WATCH</span><h3>YouTube</h3><p>Open YouTube in your default browser.</p><button class="action-btn-primary" id="mode-youtube-button" type="button">Open YouTube</button></section>
+                    </div>
+                    <div id="computer-mode-status" class="muted small status-line" role="status">Choose a mode to get started.</div>
+                </div>
+            </div></div>
+
+            <!-- CONNECTED APPS -->
+            <div id="view-composio-dash" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Connected Apps</h2><p>Real accounts connected through Composio. You sign in on each provider's own page; a status here only comes from Composio.</p></div><button id="integrations-refresh" class="integration-button secondary" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.4-3"/></svg><span>Refresh</span></button></div>
+                <div id="integrations-load-status" class="integration-load-status" role="status">Verify your Composio key in Settings to load apps.</div>
+                <div class="integrations-controls">
+                    <input id="integration-search" type="search" placeholder="Search integrations…" aria-label="Search integrations">
+                    <select id="integration-category" aria-label="Filter by category"><option value="all">All categories</option><option>Productivity</option><option>Education</option><option>Communication</option><option>Storage</option><option>Research</option><option>Development</option><option>Media</option><option>Google</option><option>Microsoft</option><option>Other</option></select>
+                </div>
+                <section id="connected-integrations-section" class="integration-section hidden"><div class="integration-section-heading"><h3>Connected</h3><span>Authenticated connections reported by Composio</span></div><div id="connected-integrations-grid" class="integration-grid"></div></section>
+                <section class="integration-section"><div class="integration-section-heading"><h3>Available</h3><span>Support is checked against the live Composio catalog</span></div><div id="available-integrations-grid" class="integration-grid"></div></section>
+                <div id="integrations-no-results" class="integration-empty hidden">No matching applications.</div>
+                <div class="browse-more-row"><button id="browse-more-integrations" class="integration-button secondary hidden" type="button">Browse more</button></div>
+                <section id="more-integrations-section" class="integration-section hidden"><div class="integration-section-heading"><h3>More supported apps</h3><span>From the authenticated Composio catalog</span></div><div id="more-integrations-grid" class="integration-grid"></div></section>
+            </div></div>
+
+            <!-- APP CONTROL -->
+            <div id="view-hub" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>App Control</h2><p>Control your connected apps directly, without asking the AI. Everything here runs through your own accounts.</p></div><button id="hub-refresh" class="integration-button secondary" type="button"><span>Refresh</span></button></div>
+                <div id="hub-root"></div>
+            </div></div>
+
+            <!-- MEMORY -->
+            <div id="view-memory" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Memory</h2><p>What Nexus has been asked to remember. Stored only on this computer. Passwords and other secrets are refused.</p></div></div>
+                <form id="memory-add-form" class="quick-command small"><input id="memory-input" type="text" maxlength="800" placeholder="Add something for Nexus to remember…" aria-label="New memory"><select id="memory-category" aria-label="Category"><option>General</option><option>Preference</option><option>Project</option><option>Study</option></select><button class="action-btn-primary" type="submit">Save</button></form>
+                <div class="toolbar"><input id="memory-search" type="search" placeholder="Search memories…" aria-label="Search memories"></div>
+                <div id="memory-status" class="muted small status-line" role="status"></div>
+                <div id="memory-list" class="doc-list"></div>
+            </div></div>
+
+            <!-- SETTINGS -->
+            <div id="view-settings" class="view hidden"><div class="page">
+                <div class="page-head"><div><h2>Settings</h2></div></div>
+                <div id="settings-tabs" class="tabs" role="tablist"></div>
+                <div id="settings-body"></div>
+                <div id="settings-integrations" class="hidden">
+                    <section class="settings-section">
+                        <h3>Composio</h3>
+                        <p class="key-help" id="composio-key-help">Use a Project API Key from Platform → your project → Settings → API Keys. Organization and “For You” keys are different. Nexus checks the key with Composio before saving it.</p>
+                        <div class="composio-key-entry">
+                            <input type="password" id="composio-key-input" autocomplete="new-password" placeholder="Paste your project API key" aria-describedby="composio-key-help composio-key-status">
+                            <button type="button" class="icon-button secondary" id="composio-key-reveal" aria-label="Show API key" title="Show or hide API key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                            <button type="button" id="composio-key-save" class="action-btn-primary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>Verify &amp; Save</span></button>
+                        </div>
+                        <div id="composio-key-status" class="composio-key-status" role="status" aria-live="polite">Your key is checked with Composio before Nexus saves it.</div>
+                        <div class="row wrap"><button type="button" id="composio-key-remove" class="integration-button secondary">Remove saved key</button><button type="button" class="text-link-button" data-external="https://dashboard.composio.dev">Open Composio Dashboard ↗</button><button type="button" class="text-link-button" data-nav="composio-dash">Manage connected apps →</button></div>
+                    </section>
+                </div>
+            </div></div>
+        </div>
+    </div>
+    <div id="setup-screen" class="setup-screen hidden"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+
+    <script src="frontend/js/core.js"></script>
+    <script src="frontend/js/i18n.js"></script>
+    <script src="renderer.js"></script>
+    <script src="frontend/js/shell.js"></script>
+    <script src="frontend/js/home.js"></script>
+    <script src="frontend/js/apps.js"></script>
+    <script src="frontend/js/documents.js"></script>
+    <script src="frontend/js/study.js"></script>
+    <script src="frontend/js/studysets.js"></script>
+    <script src="frontend/js/hub.js"></script>
+    <script src="frontend/js/research.js"></script>
+    <script src="frontend/js/calendar.js"></script>
+    <script src="frontend/js/automations.js"></script>
+    <script src="frontend/js/memory.js"></script>
+    <script src="frontend/js/settings.js"></script>
+    <script src="frontend/js/setup.js"></script>
+    <script src="frontend/js/boot.js"></script>
+</body>
+</html>

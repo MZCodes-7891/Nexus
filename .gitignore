@@ -1,0 +1,16 @@
+node_modules/
+__pycache__/
+dist/
+*.log
+.env
+
+dist-helper/
+*.spec
+
+# Personal notes and retired files: kept on this computer, not published
+TROUBLESHOOTING_REPORT.md
+voice_app.py
+bridge.js
+launch.ps1
+*`
+C*run_nexus.bat
