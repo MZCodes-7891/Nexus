@@ -53,10 +53,11 @@ const ollama = {
       return { known: Boolean(caps), tools: caps ? caps.includes('tools') : /\btools\b/.test(String(info.template || '')) || String(info.template || '').includes('.Tools'), embedding: caps ? caps.includes('embedding') : false, vision: caps ? caps.includes('vision') : false, contextLength: contextEntry?.[1] || 0 };
     } catch { return { known: false, tools: false, embedding: false, vision: false, contextLength: 0 }; }
   },
-  async chat(config, { messages, tools, format, signal, onToken, contextLength, maxTokens }) {
+  async chat(config, { messages, tools, format, signal, onToken, contextLength, maxTokens, keepAlive }) {
     const options = { temperature: config.temperature, top_p: config.topP, num_ctx: contextLength || config.contextLength };
     if (config.maxOutputTokens || maxTokens) options.num_predict = maxTokens || config.maxOutputTokens;
     const body = { model: config.model, messages: messages.map(toOllamaMessage), stream: true, options };
+    if (keepAlive !== undefined) body.keep_alive = keepAlive;
     if (tools?.length) body.tools = tools;
     if (format) body.format = format;
     const response = await expectOk(await fetch(`${this.base(config)}/api/chat`, { method: 'POST', body: JSON.stringify(body), signal }), 'Ollama');
@@ -84,6 +85,7 @@ const ollama = {
 function toOllamaMessage(message) {
   if (message.role === 'tool') return { role: 'tool', tool_name: message.name, content: message.content };
   const output = { role: message.role, content: message.content || '' };
+  if (Array.isArray(message.images) && message.images.length) output.images = message.images;
   if (message.toolCalls?.length) output.tool_calls = message.toolCalls.map(call => ({ function: { name: call.name, arguments: call.args } }));
   return output;
 }
@@ -168,8 +170,21 @@ function createModelManager({ getConfig }) {
       return capabilityCache.get(key);
     },
     async chat(request) {
-      try { return await provider().chat(getConfig(), request); }
+      // A request may name another model, such as the vision model for pictures.
+      try { return await provider().chat(request.model ? { ...getConfig(), model: request.model } : getConfig(), request); }
       catch (error) { if (error?.name !== 'AbortError') proof = null; throw friendlyError(error, provider().label); }
+    },
+    // Unloads every loaded model except one, so a second model, such as the vision model, has room on the graphics card.
+    async freeMemory(except = '') {
+      const config = getConfig();
+      if (config.provider !== 'ollama') return;
+      const base = ollama.base(config);
+      const loaded = await fetch(`${base}/api/ps`).then(reply => reply.json()).catch(() => ({ models: [] }));
+      for (const item of loaded.models || []) {
+        if (item.name === except || item.model === except) continue;
+        await fetch(`${base}/api/generate`, { method: 'POST', body: JSON.stringify({ model: item.name, keep_alive: 0 }) }).catch(() => {});
+      }
+      proof = null;
     },
     async embed(model, input, signal) {
       if (getConfig().provider !== 'ollama') throw new Error('Local embeddings need the Ollama provider.');

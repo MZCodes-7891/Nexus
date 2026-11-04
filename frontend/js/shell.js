@@ -6,7 +6,7 @@ function navBtn(view) { return document.querySelector(`.nav-btn[data-view="${vie
 function go(view) { showView(view, navBtn(view)); try { localStorage.setItem('nexus.lastView', view); } catch {} }
 
 function buildNavigation() {
-    document.getElementById('nav-list').replaceChildren(...NAV_ITEMS.map(([view, label]) => h('button', { type: 'button', class: 'nav-btn', title: label, 'aria-label': label, dataset: { view, label }, onclick: () => go(view) }, icon(view), h('span', { text: label }))));
+    drawNavigation();
     const toggle = document.getElementById('sidebar-toggle');
     toggle.append(icon('chevron'));
     toggle.addEventListener('click', () => updateSettings({ appearance: { sidebarCollapsed: !document.body.classList.contains('sidebar-collapsed') } }));
@@ -21,10 +21,27 @@ function buildNavigation() {
     });
 }
 
+// The sidebar follows the order and hidden pages chosen in Settings. Settings itself always stays, so nothing can be locked out.
+function orderedPages(appearance = appSettings?.appearance || {}) {
+    const order = (appearance.pageOrder || []).filter(view => NAV_ITEMS.some(([id]) => id === view));
+    return [...order, ...NAV_ITEMS.map(([id]) => id).filter(id => !order.includes(id))].map(id => NAV_ITEMS.find(([view]) => view === id));
+}
+function drawNavigation(appearance) {
+    const hidden = new Set((appearance?.hiddenPages || []).filter(view => view !== 'settings'));
+    const active = document.querySelector('.nav-btn.active')?.dataset.view;
+    document.getElementById('nav-list').replaceChildren(...orderedPages(appearance).filter(([view]) => !hidden.has(view)).map(([view, label]) => h('button', { type: 'button', class: `nav-btn${view === active ? ' active' : ''}`, title: label, 'aria-label': label, dataset: { view, label }, onclick: () => go(view) }, icon(view), h('span', { text: label }))));
+}
 function applyAppearance(settings) {
     const root = document.documentElement;
     root.dataset.theme = settings.appearance.theme;
     root.dataset.animations = settings.appearance.animations ? 'on' : 'off';
+    root.dataset.density = settings.appearance.density;
+    root.dataset.chatWidth = settings.appearance.chatWidth;
+    root.dataset.corners = settings.appearance.corners;
+    root.dataset.glow = settings.appearance.glow ? 'on' : 'off';
+    document.body.classList.toggle('sidebar-right', settings.appearance.sidebarSide === 'right');
+    const navKey = JSON.stringify([settings.appearance.pageOrder, settings.appearance.hiddenPages]);
+    if (navKey !== drawNavigation.last) { drawNavigation.last = navKey; drawNavigation(settings.appearance); }
     root.style.setProperty('--accent', settings.appearance.accent);
     root.style.setProperty('--font-size', `${settings.appearance.fontSize}px`);
     root.style.setProperty('--font-family', `'${settings.appearance.fontFamily.replace(/['"\\]/g, '')}',system-ui,sans-serif`);

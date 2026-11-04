@@ -21,20 +21,60 @@ function renderGeneralSettings(box) {
         settingRow('Start minimized', '', checkbox(general.startMinimized, value => set({ startMinimized: value }))),
         settingRow('Keep running in the tray when closed', 'Reminders and automations only fire while Nexus is running.', checkbox(general.closeToTray, value => set({ closeToTray: value }))),
         settingRow('Show notifications', 'Windows pop-ups for reminders and automation problems. They are still listed under the bell.', checkbox(general.notifications, value => set({ notifications: value }))),
+        settingRow('Update automatically', 'New versions download from the NEXUS page on GitHub and install the next time NEXUS restarts.', checkbox(general.autoUpdate, value => set({ autoUpdate: value }))),
+        updateRow(),
         settingRow('Desktop shortcut', 'Adds a NEXUS shortcut that always runs the current version.', h('button', { type: 'button', class: 'mini-button', text: 'Create shortcut', onclick: async () => { try { toast((await call('system:shortcut')).message, 'ok'); } catch (error) { toast(error.message, 'error'); } } }))
     ));
 }
+// Shows the version, checks for a new one, and restarts into it once it has downloaded.
+function updateRow() {
+    const line = h('span', { class: 'muted small', text: 'Checking…' });
+    const restart = h('button', { type: 'button', class: 'mini-button hidden', text: 'Restart to update', onclick: () => call('system:update-restart').catch(error => toast(error.message, 'error')) });
+    const draw = status => { line.textContent = status.message || `Version ${status.current || ''}`; restart.classList.toggle('hidden', status.status !== 'ready'); };
+    const check = h('button', { type: 'button', class: 'mini-button', text: 'Check now', onclick: async () => draw(await ipcRenderer.invoke('system:update-check')) });
+    ipcRenderer.invoke('system:update-status').then(status => draw({ ...status, message: status.message || `You have version ${status.current}.` }));
+    const listener = (_event, status) => { if (!line.isConnected) { ipcRenderer.removeListener('system:update-status', listener); return; } draw(status); };
+    ipcRenderer.on('system:update-status', listener);
+    return settingRow('Updates', '', h('div', { class: 'row wrap' }, line, check, restart));
+}
+const ACCENTS = [['#38bdf8', 'Sky'], ['#a78bfa', 'Violet'], ['#f472b6', 'Pink'], ['#f87171', 'Red'], ['#fb923c', 'Orange'], ['#facc15', 'Gold'], ['#4ade80', 'Green'], ['#2dd4bf', 'Teal'], ['#e2e8f0', 'Silver']];
 function renderAppearanceSettings(box) {
     const { appearance } = appSettings;
     const set = changes => save({ appearance: changes });
-    box.replaceChildren(section('Appearance',
-        settingRow('Background', '', selectBox([['navy', 'Deep navy'], ['midnight', 'Midnight blue'], ['black', 'Black']], appearance.theme, value => set({ theme: value }))),
-        settingRow('Accent color', '', h('input', { type: 'color', value: appearance.accent, onchange: event => set({ accent: event.target.value }) })),
+    const redraw = changes => set(changes).then(() => renderAppearanceSettings(box));
+    const picker = h('input', { type: 'color', value: appearance.accent, 'aria-label': 'Accent color', onchange: event => redraw({ accent: event.target.value }) });
+    const swatches = h('div', { class: 'accent-swatches' }, ...ACCENTS.map(([color, name]) => h('button', { type: 'button', class: 'accent-swatch', title: name, 'aria-label': `${name} accent`, 'aria-pressed': String(appearance.accent.toLowerCase() === color), style: `background:${color}`, onclick: () => redraw({ accent: color }) })));
+    // Pages can be moved up and down, and hidden from the sidebar. Settings always stays.
+    const pages = h('div', {});
+    const drawPages = () => {
+        const order = orderedPages(appSettings.appearance).map(([view]) => view);
+        const hidden = appSettings.appearance.hiddenPages;
+        const move = async (view, step) => { const next = order.slice(); const at = next.indexOf(view); const to = at + step; if (to < 0 || to >= next.length) return; [next[at], next[to]] = [next[to], next[at]]; await set({ pageOrder: next }); drawPages(); };
+        pages.replaceChildren(...orderedPages(appSettings.appearance).map(([view, label], index, list) => h('div', { class: 'page-order-row', dataset: { page: view } },
+            view === 'settings' ? h('span', { class: 'muted small', text: 'Always shown' }) : h('input', { type: 'checkbox', checked: !hidden.includes(view), 'aria-label': `Show ${label}`, onchange: async event => { await set({ hiddenPages: event.target.checked ? hidden.filter(item => item !== view) : [...hidden, view] }); drawPages(); } }),
+            h('span', { class: 'grow', text: label }),
+            h('button', { type: 'button', class: 'mini-button', text: '↑', 'aria-label': `Move ${label} up`, disabled: index === 0, onclick: () => move(view, -1) }),
+            h('button', { type: 'button', class: 'mini-button', text: '↓', 'aria-label': `Move ${label} down`, disabled: index === list.length - 1, onclick: () => move(view, 1) }))));
+    };
+    box.replaceChildren(section('Look',
+        settingRow('Background', '', selectBox([['navy', 'Deep navy'], ['midnight', 'Midnight blue'], ['black', 'Black'], ['slate', 'Slate gray'], ['purple', 'Deep purple'], ['ocean', 'Ocean'], ['forest', 'Forest'], ['crimson', 'Crimson']], appearance.theme, value => set({ theme: value }))),
+        settingRow('Accent color', 'Pick one, or choose any color.', h('div', {}, picker, swatches)),
+        settingRow('Background glow', 'The soft light at the top of the window.', checkbox(appearance.glow, value => set({ glow: value }))),
         settingRow('Font', '', selectBox(['Segoe UI', 'Bahnschrift', 'Calibri', 'Verdana', 'Tahoma', 'Consolas'], appearance.fontFamily, value => set({ fontFamily: value }))),
         settingRow('Text size', '11 to 20', numberBox(appearance.fontSize, value => set({ fontSize: value }), { min: 11, max: 20 })),
         settingRow('Animations', '', checkbox(appearance.animations, value => set({ animations: value }))),
         settingRow('Collapse the sidebar', '', checkbox(appearance.sidebarCollapsed, value => set({ sidebarCollapsed: value })))
+    ), section('Layout',
+        settingRow('Sidebar side', '', selectBox([['left', 'Left'], ['right', 'Right']], appearance.sidebarSide, value => set({ sidebarSide: value }))),
+        settingRow('Spacing', 'Compact fits more on screen.', selectBox([['compact', 'Compact'], ['comfortable', 'Comfortable'], ['spacious', 'Spacious']], appearance.density, value => set({ density: value }))),
+        settingRow('Chat width', 'How wide messages can get in AI Chat.', selectBox([['normal', 'Normal'], ['wide', 'Wide'], ['full', 'Full width']], appearance.chatWidth, value => set({ chatWidth: value }))),
+        settingRow('Corners', '', selectBox([['rounded', 'Rounded'], ['soft', 'Slightly rounded'], ['square', 'Square']], appearance.corners, value => set({ corners: value })))
+    ), section('Sidebar pages',
+        h('p', { class: 'muted small', text: 'Untick a page to hide it from the sidebar, and use the arrows to change the order. Hidden pages still open from search and links.' }),
+        pages,
+        h('button', { type: 'button', class: 'mini-button', text: 'Reset order and show all', onclick: async () => { await set({ pageOrder: [], hiddenPages: [] }); drawPages(); } })
     ));
+    drawPages();
 }
 async function renderAiSettings(box) {
     const { ai } = appSettings;
@@ -80,7 +120,10 @@ async function renderVoiceSettings(box) {
         settingRow('Microphone', '', micBox),
         settingRow('Spoken replies', '', checkbox(voice.spokenReplies, value => set({ spokenReplies: value }))),
         settingRow('Voice', '', voiceBox),
-        settingRow('Speaking speed', 'Words per minute, 80 to 320.', numberBox(voice.rate, value => set({ rate: value }), { min: 80, max: 320, step: 5 })),
+        settingRow('More voices', 'Windows can add more voices, including other accents and languages. Add them in Windows Settings under Speech, then reopen this page.', h('button', { type: 'button', class: 'mini-button', text: 'Get more voices', onclick: () => call('system:open-speech-settings').catch(error => toast(error.message, 'error')) })),
+        settingRow('Speaking speed', 'Slower or faster.', h('input', { type: 'range', min: 80, max: 320, step: 5, value: voice.rate, 'aria-label': 'Speaking speed', onchange: event => set({ rate: Number(event.target.value) }) })),
+        settingRow('Pitch', 'Lower or higher.', h('input', { type: 'range', min: -10, max: 10, step: 1, value: voice.pitch, 'aria-label': 'Pitch', onchange: event => set({ pitch: Number(event.target.value) }) })),
+        settingRow('Volume', '', h('input', { type: 'range', min: 10, max: 100, step: 5, value: voice.volume, 'aria-label': 'Volume', onchange: event => set({ volume: Number(event.target.value) }) })),
         settingRow('Pause before sending', 'Seconds of silence that end your request.', numberBox(voice.silenceSeconds, value => set({ silenceSeconds: value }), { min: 0.4, max: 5, step: 0.1 })),
         settingRow('Test speech', '', h('button', { type: 'button', class: 'mini-button', text: 'Speak a sample', onclick: () => ipcRenderer.send('speak-response', 'This is how Nexus sounds.') }))
     ), section('Voice privacy and background listening',
@@ -92,7 +135,8 @@ async function renderVoiceSettings(box) {
     const devices = await ipcRenderer.invoke('voice:devices');
     micBox.replaceWith(devices.ok === false ? h('span', { class: 'error-text small', text: devices.message }) : selectBox([['', 'System default'], ...devices.devices.map(device => [String(device.index), device.name])], String(voice.inputDevice), value => set({ inputDevice: value })));
     const voices = await ipcRenderer.invoke('voice:voices');
-    voiceBox.replaceWith(voices.ok === false ? h('span', { class: 'error-text small', text: voices.message }) : selectBox([['', 'System default'], ...voices.voices.map(item => [item.id, item.name])], voice.voiceId, value => set({ voiceId: value })));
+    // Picking a voice says a sample in it right away.
+    voiceBox.replaceWith(voices.ok === false ? h('span', { class: 'error-text small', text: voices.message }) : selectBox([['', 'System default'], ...voices.voices.map(item => [item.id, item.name.replace(/ - English \(United States\)$/, '')])], voice.voiceId, async value => { await set({ voiceId: value }); ipcRenderer.send('speak-response', 'Hi, this is my new voice.'); }));
 }
 function renderIntegrationSettings(box) { box.replaceChildren(); const panel = document.getElementById('settings-integrations'); panel.classList.remove('hidden'); refreshComposioStatus(); }
 function renderPrivacySettings(box) {

@@ -55,7 +55,7 @@ function createVoice({ rootDir, getSettings, logger }) {
   function speak(text, onDone) {
     stopSpeaking();
     const { voice } = getSettings();
-    const args = ['--rate', voice.rate];
+    const args = ['--rate', voice.rate, '--volume', voice.volume ?? 100, '--pitch', voice.pitch ?? 0];
     if (voice.voiceId) args.push('--voice', voice.voiceId);
     const child = spawnPython(rootDir, 'tts_core.py', args);
     speaker = child;

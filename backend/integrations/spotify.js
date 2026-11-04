@@ -40,12 +40,20 @@ function createSpotify({ dataDir, safeStorage, openExternal, fetchFn = (...args)
     try { reply = await fetchFn(`${apiBase}${route}`, { method, headers: { Authorization: `Bearer ${access}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20000) }); }
     catch { throw new Error('Nexus could not reach Spotify. Check your internet connection.'); }
     if (reply.status === 204) return {};
-    const data = await reply.json().catch(() => ({}));
+    // Some refusals come back as plain text rather than JSON, so the text is kept as the message.
+    let data;
+    if (typeof reply.text !== 'function') data = await reply.json().catch(() => ({}));
+    else {
+      const text = await reply.text().catch(() => '');
+      try { data = text ? JSON.parse(text) : {}; } catch { data = reply.ok ? {} : { error: { message: text } }; }
+    }
     if (!reply.ok) {
       const reason = data.error?.reason || '';
       if (reason === 'NO_ACTIVE_DEVICE' || (reply.status === 404 && /player/.test(route))) throw new Error('NO_ACTIVE_DEVICE');
       if (reason === 'PREMIUM_REQUIRED') throw new Error('PREMIUM_REQUIRED');
-      if (reply.status === 403) throw new Error('Spotify would not allow this. Check you added your account under User Management in your Spotify app.');
+      // Spotify only lets an app work while the account that made it on the developer site has Premium.
+      if (reply.status === 403 && /premium subscription required for the owner/i.test(data.error?.message || '')) throw new Error('Spotify blocks this until the account that made your Spotify app on the developer site has Premium. If you just got Premium, it can take a few hours to start working.');
+      if (reply.status === 403) throw new Error(`Spotify would not allow this${data.error?.message ? `: ${String(data.error.message).slice(0, 200)}` : ''}. Check you added your account under User Management in your Spotify app.`);
       throw new Error(`Spotify answered with an error: ${String(data.error?.message || reply.status).slice(0, 200)}`);
     }
     return data;

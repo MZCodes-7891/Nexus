@@ -1,10 +1,10 @@
 {
   "name": "nexus",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "npm run build:helper && electron-builder",
+    "build": "npm run build:helper && electron-builder --publish never",
     "test": "node --test tests/unit.test.js",
     "test:app": "node tests/e2e_app.js",
     "test:live": "node tests/e2e_live.js",
@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@composio/core": "^0.27.0",
+    "electron-updater": "^6.8.11",
     "playwright-core": "^1.64.1",
     "zod": "^4.6.7"
   },
@@ -48,9 +49,18 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "NEXUS",
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "artifactName": "NEXUS-Setup-${version}.${ext}"
     },
-    "afterPack": "build/afterPack.js"
+    "afterPack": "build/afterPack.js",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "MZCodes-7891",
+        "repo": "Nexus",
+        "releaseType": "release"
+      }
+    ]
   },
   "description": "A personal AI assistant for Windows that runs on your own computer.",
   "productName": "NEXUS",

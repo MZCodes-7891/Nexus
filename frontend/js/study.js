@@ -227,6 +227,28 @@ async function renderTestsTab() {
     const counts = Object.fromEntries(Object.keys(TYPE_LABELS).map(type => [type, h('input', { class: 'field', type: 'number', min: 0, max: 20, value: { multiple_choice: 6, short_answer: 1, application: 2, scenario: 1 }[type] || 0, 'aria-label': TYPE_LABELS[type] })]));
     const create = h('button', { type: 'button', class: 'action-btn-primary', text: 'Generate test' });
     const instructions = instructionsBox('tests');
+    // A unit document holds several topics: find them, then test one, a few, or the whole unit.
+    let found = null;
+    const topicBox = h('div', { class: 'topic-picker' });
+    const topicStatus = h('div', { class: 'muted small status-line', role: 'status' });
+    const curriculumInfo = await ipcRenderer.invoke('study:curriculum');
+    const courseSelect = selectBox([['', 'None, just my documents'], ...curriculumInfo.courses.map(course => [course.id, course.name])], curriculumInfo.current, async value => { await updateSettings({ study: { curriculum: value } }); if (found) findTopics.click(); });
+    const findTopics = h('button', { type: 'button', class: 'mini-button', text: 'Find topics in these files' });
+    const chosenTopics = () => (found ? [...topicBox.querySelectorAll('input[data-topic]:checked')].map(input => input.dataset.topic) : []);
+    const drawTopics = () => {
+        if (!found) { topicBox.replaceChildren(); return; }
+        const whole = h('input', { type: 'checkbox', checked: true, 'aria-label': 'Whole unit', onchange: event => { topicBox.querySelectorAll('input[data-topic]').forEach(input => { input.checked = event.target.checked; }); } });
+        topicBox.replaceChildren(
+            h('label', { class: 'topic-row topic-whole' }, whole, h('b', { text: 'Whole unit (unit test)' })),
+            ...found.topics.map(topic => h('label', { class: 'topic-row', title: topic.preview }, h('input', { type: 'checkbox', checked: true, dataset: { topic: topic.id }, onchange: () => { whole.checked = topicBox.querySelectorAll('input[data-topic]:not(:checked)').length === 0; } }), h('span', { text: topic.title }), h('span', { class: 'muted small', text: ` · ${topic.source.replace(/ - .*$/, '').slice(0, 40)}` }))));
+    };
+    findTopics.addEventListener('click', busyButton(findTopics, 'Reading the files…', async () => {
+        if (!picker.count()) throw new Error('Tick the unit document first.');
+        found = await call('study:find-topics', picker.selection());
+        topicStatus.textContent = `${found.topics.length} topic${found.topics.length === 1 ? '' : 's'} found${found.method === 'ai' ? ' (the file has no clear headings, so the AI split it)' : ''}.${found.unit ? ` Matches ${found.course} Unit ${found.unit.code}: ${found.unit.title}, so questions test that unit's outcomes.` : (found.course ? ' It did not match a curriculum unit, so questions follow the documents only.' : '')} Untick the topics you don't want.`;
+        topicStatus.dataset.kind = 'ok';
+        drawTopics();
+    }));
     const list = h('div', { class: 'doc-list' });
     const area = h('div', {});
     const takeTest = test => renderTakeTest(test, area, refresh);
@@ -236,11 +258,13 @@ async function renderTestsTab() {
     };
     create.addEventListener('click', busyButton(create, 'Writing test…', async () => {
         if (!picker.count()) throw new Error('Tick at least one source first.');
-        const result = await call('study:test-generate', { selection: picker.selection(), title: title.value, subject: subject.value, instructions: instructions.input.value, counts: Object.fromEntries(Object.entries(counts).map(([type, input]) => [type, Number(input.value)])) });
+        const topicIds = chosenTopics();
+        if (found && !topicIds.length) throw new Error('Tick at least one topic, or the whole unit.');
+        const result = await call('study:test-generate', { selection: picker.selection(), title: title.value || (found && topicIds.length < found.topics.length ? `Practice test: ${found.topics.filter(topic => topicIds.includes(topic.id)).map(topic => topic.title).join(', ').slice(0, 80)}` : found ? `Unit test${found.unit ? `: ${found.unit.title}` : ''}` : ''), subject: subject.value, instructions: instructions.input.value, counts: Object.fromEntries(Object.entries(counts).map(([type, input]) => [type, Number(input.value)])), ...(found ? { topicToken: found.token, topicIds, unitCode: found.unit?.code || '' } : {}) });
         const asked = Object.values(counts).reduce((sum, input) => sum + Number(input.value), 0);
         toast(asked && result.test.questions.length < asked ? `Made ${result.test.questions.length} of ${asked} questions. The AI could not prove the others from your files, so they were left out.` : 'Practice test ready.', 'ok'); await refresh(); takeTest(result.test);
     }));
-    panel.replaceChildren(h('details', { class: 'browser-details' }, h('summary', { text: 'New practice test' }), h('div', { class: 'study-form', style: 'margin-top:10px' }, h('div', { class: 'study-form-row' }, title, subject), h('div', { class: 'study-form-row' }, Object.entries(counts).map(([type, input]) => h('label', { class: 'muted small' }, TYPE_LABELS[type], input))), picker.element, instructions.element, h('div', { class: 'row' }, create))), h('h3', { class: 'section-title', text: 'Your tests' }), list, area);
+    panel.replaceChildren(h('details', { class: 'browser-details' }, h('summary', { text: 'New practice test' }), h('div', { class: 'study-form', style: 'margin-top:10px' }, h('div', { class: 'study-form-row' }, title, subject), h('div', { class: 'study-form-row' }, Object.entries(counts).map(([type, input]) => h('label', { class: 'muted small' }, TYPE_LABELS[type], input))), picker.element, h('div', { class: 'row wrap' }, h('label', { class: 'muted small hub-inline' }, 'Curriculum', courseSelect), findTopics), topicStatus, topicBox, instructions.element, h('div', { class: 'row' }, create))), h('h3', { class: 'section-title', text: 'Your tests' }), list, area);
     await refresh();
 }
 
@@ -319,7 +343,7 @@ function openStudyTab(tab, options = {}) {
     studyTabSelect(tab, options);
 }
 function bindStudy() {
-    const PANELS = { sets: 'Study sets', d2l: 'D2L Practice', assignments: 'Assignments', library: 'Library', guides: 'Study guides', flashcards: 'Flashcards', tests: 'Practice tests', quiz: 'Quiz', planner: 'Planner', progress: 'Progress' };
+    const PANELS = { sets: 'Study sets', d2l: 'D2L Practice', assignments: 'Assignments', library: 'Library', guides: 'Study guides', flashcards: 'Flashcards', tests: 'Practice tests', writing: 'My writing', quiz: 'Quiz', planner: 'Planner', progress: 'Progress' };
     let tabOptions = {};
     const select = tabs('study-tabs', Object.entries(PANELS), async id => {
         for (const key of Object.keys(PANELS)) document.getElementById(`study-tab-${key}`).classList.toggle('hidden', key !== id);
@@ -331,6 +355,7 @@ function bindStudy() {
             if (id === 'guides') await renderGuidesTab(options.id);
             if (id === 'flashcards') await renderFlashcardsTab();
             if (id === 'tests') await renderTestsTab();
+            if (id === 'writing') await renderWritingTab();
             if (id === 'quiz') await renderQuizTab(options);
             if (id === 'planner') await renderPlannerTab();
             if (id === 'progress') await renderProgressTab();

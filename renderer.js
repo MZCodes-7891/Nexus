@@ -23,6 +23,10 @@ let showAllIntegrations = false;
 let integrationErrors = new Map();
 let attachedDocumentText = '';
 let attachedDocumentNames = [];
+let attachedPictures = [];
+// Pictures are shown straight from the file on this PC.
+const pictureUrl = file => `file:///${encodeURI(String(file).replace(/\\/g, '/')).replace(/#/g, '%23').replace(/\?/g, '%3F')}`;
+const pictureStrip = files => (files?.length ? h('div', { class: 'chat-pictures' }, ...files.map(file => h('img', { class: 'chat-picture', src: pictureUrl(file), alt: 'Picture', loading: 'lazy', onclick: () => ipcRenderer.invoke('documents:open-picture', file) }))) : null);
 let studyTimerInterval = null;
 let studyTimerEndsAt = 0;
 let studyModeOwnsDnd = false;
@@ -277,6 +281,7 @@ function renderProjectMessages() {
         if (message.actions?.length || message.plan?.steps?.length) { const panel = h('div', { class: 'run-panel' }); renderRunPanel(panel, { plan: message.plan || { steps: [] }, actions: message.actions || [] }); node.append(panel); }
         if (message.practiceTest && message.role === 'assistant') { const holder = h('div', {}); node.append(holder); renderPracticeTest(holder, message.practiceTest, project, message); }
         else { const holder = h('div', {}); node.append(holder); renderFormattedMessage(holder, message.displayContent || message.content); }
+        if (message.role === 'user' && message.imagePaths?.length) node.append(pictureStrip(message.imagePaths));
         box.appendChild(node);
     }
     box.scrollTop = box.scrollHeight;
@@ -384,7 +389,7 @@ function showView(viewId, btn) {
     const target = btn || navBtn(viewId);
     if (target) { target.classList.add('active'); target.setAttribute('aria-current', 'page'); }
     const title = document.getElementById('page-title');
-    if (title) title.textContent = target?.dataset.label || 'NEXUS';
+    if (title) title.textContent = target?.dataset.label || NAV_ITEMS.find(([view]) => view === viewId)?.[1] || 'NEXUS';
     if (viewId === 'composio-dash') loadIntegrations();
     if (viewId === 'school') refreshSchoolData();
     if (viewId === 'tasks') ipcRenderer.invoke('tasks:list').then(tasks => { localTasks = tasks; renderTasks(); }).catch(() => renderTasks());
@@ -457,6 +462,11 @@ function editTask(task) {
 async function attachLocalDocuments(showChatNotice = false) {
     const result = await ipcRenderer.invoke('documents:pick');
     if (result.canceled) return;
+    if (result.pictures?.length) {
+        attachedPictures = result.pictures.map(item => item.path);
+        if (showChatNotice) addAssistantMessage(`${result.pictures.length} picture${result.pictures.length === 1 ? '' : 's'} attached: ${result.pictures.map(item => item.name).join(', ')}. Ask Nexus anything about ${result.pictures.length === 1 ? 'it' : 'them'}.`);
+        if (!result.documents?.length) return;
+    }
     if (!result.documents?.length) {
         const errors = (result.errors || []).map(item => `${item.name}: ${item.message}`).join(' ');
         const message = errors || 'No readable documents were selected.';
@@ -900,6 +910,7 @@ function renderRunPanel(panel, run) {
     for (const action of run.actions || []) {
         const state = action.running ? 'in_progress' : action.cancelled ? 'declined' : action.ok ? 'completed' : 'failed';
         panel.append(h('div', { class: 'run-row', dataset: { state } }, h('span', { class: 'run-mark', text: RUN_LABELS[state] }), h('span', {}, action.title || action.tool, action.summary ? h('div', { class: 'run-detail', text: action.summary }) : null)));
+        if (action.image) panel.append(pictureStrip([action.image]));
     }
     if (run.status) panel.append(h('div', { class: 'run-status', text: run.status }));
 }
@@ -925,7 +936,9 @@ function setChatDocuments(ids, names) {
 
 async function sendMessage() {
     const input = document.getElementById('chat-input');
-    const text = input?.value.trim();
+    const typed = input?.value.trim();
+    const pictures = attachedPictures.slice();
+    const text = typed || (pictures.length ? 'What is in this picture?' : '');
     if (!text || aiBusy) return;
     const project = currentProject() || createProject(false);
     setRunning(true);
@@ -935,7 +948,7 @@ async function sendMessage() {
     const isPracticeTest = /^\s*NEXUS_FULL_PRACTICE_TEST\b/i.test(text);
     const displayContent = isPracticeTest ? `Build a practice test (${text.match(/Subject:\s*([^\r\n]+)/i)?.[1] || 'selected sources'})` : documentNames.length ? `${text}\n\n[Attached: ${documentNames.join(', ')}]` : chatDocumentNames.length ? `${text}\n\n[Using: ${chatDocumentNames.join(', ')}]` : text;
     chatBox.querySelector('.chat-intro')?.remove();
-    chatBox.append(h('div', { class: 'message user-msg', text: displayContent }));
+    chatBox.append(h('div', { class: 'message user-msg' }, h('div', { text: displayContent }), pictureStrip(pictures)));
     input.value = ''; input.style.height = 'auto';
     const panel = h('div', { class: 'run-panel hidden' });
     const body = h('div', { class: 'typing-cursor' });
@@ -943,7 +956,9 @@ async function sendMessage() {
     chatBox.append(thinking); chatBox.scrollTop = chatBox.scrollHeight;
     attachedDocumentText = '';
     attachedDocumentNames = [];
+    attachedPictures = [];
     const userMessage = { role: 'user', content: text, displayContent };
+    if (pictures.length) userMessage.imagePaths = pictures;
     if (documentText) { userMessage.documentText = documentText; userMessage.documentNames = documentNames; }
     project.messages.push(userMessage);
     if (project.title === 'New project') {
@@ -976,11 +991,12 @@ async function sendMessage() {
         if (data.type === 'token') { run.status = ''; streamed += data.text; scheduleRepaint(); renderRunPanel(panel, run); }
         else if (data.type === 'reset') { streamed = ''; repaint(); }
         else if (data.type === 'status') { run.status = data.text; renderRunPanel(panel, run); }
+        else if (data.type === 'images_seen') { userMessage.imageNotes = data.notes; saveProjects(); }
         else if (data.type === 'plan') { run.plan = { goal: data.goal, steps: data.steps }; renderRunPanel(panel, run); }
         else if (data.type === 'tool_start') { run.status = ''; run.actions.push({ id: data.id, tool: data.name, title: data.title, running: true }); renderRunPanel(panel, run); }
         else if (data.type === 'tool_end') {
             const action = run.actions.find(item => item.id === data.id);
-            if (action) Object.assign(action, { running: false, ok: data.ok, cancelled: data.cancelled, summary: data.summary });
+            if (action) Object.assign(action, { running: false, ok: data.ok, cancelled: data.cancelled, summary: data.summary, ...(data.ok && data.card?.kind === 'image' ? { image: data.card.path } : {}) });
             renderRunPanel(panel, run);
             if (data.card?.kind === 'study-guide') PAGE_HOOKS.studyChanged?.();
         } else if (data.type === 'done') {
@@ -1009,7 +1025,9 @@ async function sendMessage() {
     const memory = buildConversationMemory(text, project.id, savedMemories);
     // Failed turns aren't replayed to the model, and bulky practice-test payloads stay out of normal history.
     // An old reply that claimed an action with nothing behind it is marked, or the AI reads it later as something it really did.
-    const history = project.messages.slice(-24).filter(message => !message.failed).map(({ role, content, actions, documentText: attached, documentNames: names }) => ({ role, content: role === 'assistant' && !(actions || []).some(action => action.ok) && CLAIMED_ACTION.test(String(content || '')) ? `${content}\n\n[Note from Nexus: no action actually ran for this reply, so nothing it describes was done.]` : content, ...(attached ? { documentText: attached, documentNames: names } : {}) }));
+    const history = project.messages.slice(-24).filter(message => !message.failed).map(({ role, content, actions, documentText: attached, documentNames: names, imagePaths, imageNotes }, index, list) => ({ ...(index === list.length - 1 && imagePaths?.length ? { imagePaths } : {}), role, content: role === 'user' && imageNotes && index !== list.length - 1 ? `${content}
+
+${imageNotes}` : role === 'assistant' && !(actions || []).some(action => action.ok) && CLAIMED_ACTION.test(String(content || '')) ? `${content}\n\n[Note from Nexus: no action actually ran for this reply, so nothing it describes was done.]` : content, ...(attached ? { documentText: attached, documentNames: names } : {}) }));
     const started = await ipcRenderer.invoke('agent:send', { messages: history, memory, memoryAction, documentIds: chatDocumentIds, workProject: { projectId: project.id, projectTitle: project.title } });
     if (started?.ok === false) { ipcRenderer.removeListener('agent:event', onEvent); streamed = started.message; repaint(); finish({ role: 'assistant', content: started.message, failed: true }); return; }
     activeRunId = started.runId;

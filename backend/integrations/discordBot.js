@@ -36,6 +36,21 @@ function createDiscordBot({ dataDir, safeStorage, fetchFn = (...args) => fetch(.
     if (!reply.ok) throw new Error(`Discord answered with an error: ${String(data.message || reply.status).slice(0, 200)}`);
     return data;
   }
+  // A message with a file attached, such as a picture Nexus made.
+  async function sendFile(token, { channelId, content = '', filePath }) {
+    const file = String(filePath || '');
+    const bytes = await fs.promises.readFile(file).catch(() => { throw new Error('Nexus could not find that file to send.'); });
+    if (bytes.length > 9.5 * 1024 * 1024) throw new Error('That file is too big to send on Discord.');
+    const form = new FormData();
+    form.append('payload_json', JSON.stringify({ content: String(content).slice(0, 2000), allowed_mentions: { parse: [] } }));
+    form.append('files[0]', new Blob([bytes]), path.basename(file));
+    let reply;
+    try { reply = await fetchFn(`${apiBase}/channels/${required(channelId, 'A channel')}/messages`, { method: 'POST', headers: { Authorization: `Bot ${token}`, 'User-Agent': 'NexusBot (https://github.com, 2.0)' }, body: form, signal: AbortSignal.timeout(60000) }); }
+    catch { throw new Error('Nexus could not reach Discord. Check your internet connection and try again.'); }
+    const data = await reply.json().catch(() => ({}));
+    if (!reply.ok) throw new Error(`Discord would not take the file: ${String(data.message || reply.status).slice(0, 200)}`);
+    return data;
+  }
   const inviteUrl = id => `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(id)}&scope=bot&permissions=${INVITE_PERMISSIONS}`;
   const hasIntents = flags => (Number(flags) & INTENTS) === INTENTS;
 
@@ -77,6 +92,9 @@ function createDiscordBot({ dataDir, safeStorage, fetchFn = (...args) => fetch(.
   }
   const ROUTES = {
     'discord.me': token => request(token, '/users/@me'),
+    'discord.open-dm': (token, { userId }) => request(token, '/users/@me/channels', { method: 'POST', body: { recipient_id: String(userId || '') } }),
+    'discord.send-file': (token, args) => sendFile(token, args),
+    'discord.typing': (token, { channelId }) => request(token, `/channels/${required(channelId, 'A channel')}/typing`, { method: 'POST' }),
     'discord.servers': token => request(token, '/users/@me/guilds'),
     'discord.channels': (token, { serverId }) => request(token, `/guilds/${required(serverId, 'A server')}/channels`),
     'discord.messages': (token, { channelId }) => request(token, `/channels/${required(channelId, 'A channel')}/messages?limit=50`),

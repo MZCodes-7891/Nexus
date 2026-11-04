@@ -1,4 +1,5 @@
-# Builds the Windows installer and attaches it to a GitHub release whenever a version tag such as v2.0.0 is pushed.
+# Builds the Windows installer and attaches it to a GitHub release whenever a version tag such as v2.2.0 is pushed.
+# Installed copies update from the newest release, so the release needs latest.yml and the blockmap as well as the installer.
 name: Release
 
 on:
@@ -28,4 +29,4 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/NEXUS*.exe --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" dist/NEXUS-Setup-*.exe dist/NEXUS-Setup-*.exe.blockmap dist/latest.yml --generate-notes

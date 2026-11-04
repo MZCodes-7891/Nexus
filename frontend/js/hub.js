@@ -67,7 +67,8 @@ function renderSpotifySetup(panel, current) {
         step(1, 'Open Spotify\'s developer site, sign in, and press Create app. Name it Nexus. ', hubButton('Open Spotify', () => ipcRenderer.invoke('open-external-url', 'https://developer.spotify.com/dashboard'))),
         step(2, 'For Redirect URI, paste this exactly: ', h('code', { text: current.redirectUri }), copy),
         step(3, 'Tick Web API, agree to the terms, and press Save. Then open Settings and copy the Client ID.'),
-        step(4, 'Paste it below and press Connect. Spotify asks you to agree, once.'),
+        step(4, 'Open User Management in the same app, and add your name and the email of your Spotify account. Spotify refuses accounts that are not listed there.'),
+        step(5, 'Paste the Client ID below and press Connect. Spotify asks you to agree, once.'),
         h('div', { class: 'row wrap' }, clientId, connect),
         status);
 }
@@ -78,8 +79,9 @@ async function renderSpotifyPanel(panel) {
     const current = await ipcRenderer.invoke('hub:spotify-status');
     if (!current.connected || current.signedOut) { panel.append(spotifyOrderBar('Connect Spotify below, then tell Nexus what to do here')); renderSpotifySetup(panel, current); return; }
     panel.append(h('div', { class: 'row wrap' }, h('span', { class: 'muted small', text: current.failed ? current.message : `Connected as ${current.name}${current.premium ? '' : '. Spotify only lets Premium accounts control playback from other apps, so play, pause, and skip may not work, but playlists will'}.` }), hubButton('Disconnect', async () => { await call('hub:spotify-disconnect'); panel.replaceChildren(panel.firstChild); await renderSpotifyPanel(panel); })));
-    if (current.failed) return;
+    // The box stays even when Spotify's account check fails, so a request can still be sent and Nexus explains any problem.
     panel.append(spotifyOrderBar());
+    if (current.failed) { panel.append(h('div', { class: 'row wrap' }, hubButton('Open Spotify developer site', () => ipcRenderer.invoke('open-external-url', 'https://developer.spotify.com/dashboard')))); return; }
     const status = h('div', { class: 'muted small status-line', role: 'status' });
     const say = (message, failed = true) => { status.textContent = message || ''; status.dataset.kind = failed && message ? 'error' : ''; };
     const run = async (id, args) => { const result = await ipcRenderer.invoke('hub:run', id, args); if (!result.ok) say(result.message); else say(''); return result; };
@@ -161,6 +163,41 @@ function renderDiscordSetup(panel, bot) {
         status);
 }
 
+// Linking a Discord account lets that one person control Nexus by messaging the bot from their phone.
+async function renderPhoneLink(box) {
+    const current = await ipcRenderer.invoke('hub:phone-status');
+    const status = h('div', { class: 'muted small status-line', role: 'status' });
+    const redraw = async () => { box.replaceChildren(); await renderPhoneLink(box); };
+    box.append(h('h4', { text: 'Control Nexus from your phone' }));
+    if (current.linked) {
+        box.append(h('p', { class: 'muted small', text: `Linked to ${current.name || 'your Discord account'}. Message the bot from Discord on your phone and Nexus does it on this PC, then answers you there. Risky things, like deleting, ask you to reply yes first. Nexus has to be running on this PC.` }),
+            h('div', { class: 'row wrap' }, hubButton('Unlink', async () => { await call('hub:phone-unlink'); await redraw(); })));
+        return;
+    }
+    const person = h('select', { class: 'field', 'aria-label': 'Your Discord account' }, h('option', { value: '', text: 'Loading people…' }));
+    const link = h('button', { type: 'button', class: 'action-btn-primary', text: 'Link my account' });
+    link.addEventListener('click', busyButton(link, 'Sending code…', async () => {
+        const result = await ipcRenderer.invoke('hub:phone-link', person.value, person.selectedOptions[0]?.textContent || '');
+        status.textContent = result.message;
+        status.dataset.kind = result.ok ? 'ok' : 'error';
+        if (result.ok) waitForLink();
+    }));
+    const waitForLink = () => {
+        const timer = setInterval(async () => {
+            if (!box.isConnected) { clearInterval(timer); return; }
+            const now = await ipcRenderer.invoke('hub:phone-status');
+            if (now.linked) { clearInterval(timer); toast('Your phone is linked.', 'ok'); await redraw(); }
+            else if (!now.waitingForCode) { clearInterval(timer); status.textContent = 'The code ran out. Press Link my account again.'; status.dataset.kind = 'error'; }
+        }, 4000);
+    };
+    box.append(h('p', { class: 'muted small', text: 'Choose your own Discord account. The bot sends you a code in a direct message; reply with it, and from then on you can message the bot from your phone to tell Nexus what to do. Only your account is listened to.' }),
+        h('div', { class: 'row wrap' }, person, link), status);
+    if (current.waitingForCode) { status.textContent = 'Waiting for you to reply to the bot with the code.'; waitForLink(); }
+    const result = await ipcRenderer.invoke('hub:phone-people');
+    if (!result.ok || !result.people?.length) { person.replaceChildren(h('option', { value: '', text: result.ok ? 'Add the bot to your server first' : 'Could not load people' })); if (!result.ok) { status.textContent = result.message; status.dataset.kind = 'error'; } return; }
+    person.replaceChildren(h('option', { value: '', text: 'Choose your account' }), ...result.people.map(item => h('option', { value: item.id, text: item.name })));
+}
+
 async function renderDiscordPanel(panel) {
     const bot = await ipcRenderer.invoke('hub:discord-status');
     if (!bot.connected || bot.invalid) { renderDiscordSetup(panel, bot); return; }
@@ -201,6 +238,7 @@ async function renderDiscordPanel(panel) {
     send.addEventListener('click', busyButton(send, 'Sending…', async () => {
         if ((await run('discord.send', { channelId: channel.value, content: box.value })).ok) { box.value = ''; toast('Message sent.', 'ok'); await loadMessages(); }
     }));
+    const phoneBox = h('div', { class: 'hub-phone' });
     const inboxStatus = h('div', { class: 'muted small status-line', role: 'status' });
     const inboxList = h('div', { class: 'doc-list' });
     const OUTCOMES = { waiting: 'With Claude', done: 'Done, ready in Studio', held: 'Needs your okay', failed: 'Not finished', ignored: 'Not used' };
@@ -216,9 +254,11 @@ async function renderDiscordPanel(panel) {
         await loadInbox();
     }));
     panel.append(h('div', { class: 'study-form-row' }, server, channel, hubButton('Refresh messages', loadMessages)), status, messages, box, h('div', { class: 'row' }, send), members,
+        phoneBox,
         h('h4', { text: 'Game suggestions' }), h('p', { class: 'muted small', text: 'When someone with the Owner role pings the bot in a suggestions post, it replies there and sends the post to Claude, who works on it in Studio. Nexus looks for pings once a minute while it runs, and Studio needs to be open.' }),
         h('div', { class: 'row wrap' }, checkNow, hubButton('Open folder', () => ipcRenderer.invoke('hub:suggestions-folder'))), inboxStatus, inboxList);
     loadInbox().catch(() => {});
+    renderPhoneLink(phoneBox).catch(error => phoneBox.append(h('p', { class: 'error-text small', text: error.message })));
     const servers = await run('discord.servers');
     if (!servers.ok) return;
     const items = hubList(servers.data);

@@ -334,3 +334,66 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 
 @media(max-width:1180px) { .status-pill { display:none; } }
 @media(max-width:980px) { .docs-layout,.chat-layout,.home-hero { grid-template-columns:1fr; } .chat-layout { height:auto; } .chat-layout .projects-panel { max-height:190px; } .chat-container { height:calc(100vh - 150px); } .task-add-form.wide { grid-template-columns:1fr 1fr; } .orb-container.compact { display:none; } }
+
+/* Pictures in chat: ones the user sent, and ones Nexus made. */
+.chat-pictures { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.chat-picture { max-width: min(360px, 100%); max-height: 360px; border-radius: 10px; border: 1px solid var(--border-color); cursor: zoom-in; object-fit: contain; background: rgba(0, 0, 0, 0.15); }
+.user-msg .chat-picture { max-width: 220px; max-height: 220px; }
+
+/* Personalization: more backgrounds, and layout choices from Settings → Appearance. */
+:root[data-theme="purple"] { --bg-deep:#0d0718; --bg-dark:#140b24; --bg-surface:rgba(26,14,44,.92); --bg-panel:rgba(36,20,60,.84); --border-color:rgba(196,160,255,.16); }
+:root[data-theme="forest"] { --bg-deep:#04100b; --bg-dark:#071a12; --bg-surface:rgba(10,30,22,.92); --bg-panel:rgba(14,42,30,.84); --border-color:rgba(140,230,180,.14); }
+:root[data-theme="crimson"] { --bg-deep:#12060a; --bg-dark:#1c0a10; --bg-surface:rgba(36,12,20,.92); --bg-panel:rgba(50,18,28,.84); --border-color:rgba(255,150,170,.15); }
+:root[data-theme="slate"] { --bg-deep:#0e1014; --bg-dark:#14171d; --bg-surface:rgba(24,27,34,.94); --bg-panel:rgba(32,36,45,.88); --border-color:rgba(200,210,225,.13); }
+:root[data-theme="ocean"] { --bg-deep:#021218; --bg-dark:#041b24; --bg-surface:rgba(6,32,42,.92); --bg-panel:rgba(10,44,58,.84); --border-color:rgba(120,220,240,.15); }
+:root:is([data-theme="purple"],[data-theme="forest"],[data-theme="crimson"],[data-theme="slate"],[data-theme="ocean"]) #sidebar { background:linear-gradient(180deg,var(--bg-surface),var(--bg-deep)); }
+:root[data-glow="off"] .bg-glow { display:none; }
+:root[data-glow="off"] body { background:var(--bg-deep); }
+
+body.sidebar-right { flex-direction:row-reverse; }
+body.sidebar-right #sidebar { border-right:0;border-left:1px solid var(--border-color); }
+body.sidebar-right.sidebar-collapsed .nav-btn:hover::after { left:auto;right:70px; }
+body.sidebar-right .sidebar-toggle svg { transform:rotate(180deg); }
+body.sidebar-right.sidebar-collapsed .sidebar-toggle svg { transform:none; }
+
+:root[data-density="compact"] #view-port { padding:12px 14px 20px; }
+:root[data-density="compact"] .nav-btn { padding-top:4px;padding-bottom:4px; }
+:root[data-density="compact"] .message { padding:9px 13px;line-height:1.5; }
+:root[data-density="compact"] .school-card, :root[data-density="compact"] .home-card { padding:12px; }
+:root[data-density="spacious"] #view-port { padding:34px 44px 48px; }
+:root[data-density="spacious"] .message { padding:18px 22px;line-height:1.8; }
+
+:root[data-chat-width="wide"] .message { max-width:min(92%,1100px); }
+:root[data-chat-width="full"] .message { max-width:100%; }
+
+:root[data-corners="soft"] { --radius:9px; }
+:root[data-corners="square"] { --radius:2px; }
+:root[data-corners="square"] :is(.message,.school-card,.home-card,.field,button,input,select,textarea,.nav-btn,.run-panel,.chat-picture) { border-radius:3px!important; }
+:root[data-corners="soft"] :is(.message,.school-card,.home-card,.run-panel) { border-radius:9px!important; }
+
+.page-order-row { display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border-color); }
+.page-order-row .grow { flex:1; }
+.accent-swatches { display:flex;flex-wrap:wrap;gap:6px;margin-top:6px; }
+.accent-swatch { width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0; }
+.accent-swatch[aria-pressed="true"] { border-color:#fff; }
+/* The new backgrounds tint the cards and the floating box too, not just the page behind them. */
+:root:is([data-theme="purple"],[data-theme="forest"],[data-theme="crimson"],[data-theme="slate"],[data-theme="ocean"]) :is(.card,.school-card,.module-card,.doc-preview,.settings-section,.home-card) { background:linear-gradient(150deg,var(--bg-panel),var(--bg-surface)); }
+:root:is([data-theme="purple"],[data-theme="forest"],[data-theme="crimson"],[data-theme="slate"],[data-theme="ocean"]) .welcome-card { background:radial-gradient(ellipse at 94% 0%,var(--glow-blue),transparent 44%),linear-gradient(120deg,var(--bg-panel),var(--bg-surface)); }
+:root:is([data-theme="purple"],[data-theme="forest"],[data-theme="crimson"],[data-theme="slate"],[data-theme="ocean"]) :is(.ask-bar,header) { background:var(--bg-surface); }
+body.sidebar-right .ask-bar { right:260px; }
+body.sidebar-right.sidebar-collapsed .ask-bar { right:88px; }
+/* Square corners reach everything except things that are meant to be round. */
+:root[data-corners="square"] *:not(.nexus-orb):not([class*="orb"]):not(.accent-swatch):not([class*="dot"]):not([class*="spin"]):not([class*="avatar"]):not(input[type="range"]):not(input[type="checkbox"]) { border-radius:3px!important; }
+input[type="range"],input[type="checkbox"] { accent-color:var(--accent); }
+
+/* Picking topics from a unit document for a practice test. */
+.topic-picker { display:flex;flex-direction:column;gap:2px;margin:6px 0 10px;max-height:260px;overflow:auto; }
+.topic-row { display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;cursor:pointer; }
+.topic-row:hover { background:rgba(125,180,255,.06); }
+.topic-whole { border-bottom:1px solid var(--border-color);margin-bottom:4px; }
+
+/* My writing */
+.style-profile ul { margin:6px 0 8px 18px;padding:0; }
+.style-profile li { margin:3px 0; }
+.style-output { margin-top:12px;padding:14px 16px;border:1px solid var(--border-color);border-radius:var(--radius);background:rgba(0,0,0,.15); }
+.style-text { white-space:pre-wrap;line-height:1.7; }

@@ -28,6 +28,12 @@ const { createDocumentLibrary, SUPPORTED } = require('./backend/documents/librar
 const { readDocument } = require('./backend/documents/reader');
 const { createMemory, createTasks, createCalendar } = require('./backend/productivity/productivity');
 const { createHub } = require('./backend/integrations/hub');
+const { createPhoneController } = require('./backend/integrations/phone');
+const { createImages, isImagePath, IMAGE_TYPES } = require('./backend/ai/images');
+const { createUpdater } = require('./backend/core/updater');
+const { findTopics, materialFor } = require('./backend/study/topics');
+const curriculum = require('./backend/study/curriculum');
+const { createWritingStyle } = require('./backend/productivity/writingStyle');
 const { createDiscordBot } = require('./backend/integrations/discordBot');
 const { createSpotify } = require('./backend/integrations/spotify');
 const { createSuggestionInbox } = require('./backend/integrations/suggestions');
@@ -65,12 +71,15 @@ async function loadAiKey() {
 const models = createModelManager({ getConfig: () => ({ ...getSettings().ai, apiKey: aiApiKey }) });
 
 async function confirmAction({ title, message, detail }) {
+  // A request sent from the phone is approved from the phone, since nobody may be at the PC.
+  if (phone?.isRunning()) return phone.confirm({ message: [message, /^\s*[{[]/.test(detail || '') ? '' : detail].filter(Boolean).join(' ') || title });
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   if (!mainWindow.isVisible()) mainWindow.show();
   const choice = await dialog.showMessageBox(mainWindow, { type: 'question', title, message, detail, buttons: ['Cancel', 'Allow'], defaultId: 0, cancelId: 0, noLink: true });
   return choice.response === 1;
 }
 const setupService = createSetup({ models, getSettings, updateSettings: changes => settings.update(changes), send });
+let phone = null;
 const permissions = createPermissions({ getSettings, confirm: confirmAction, logger });
 const guard = createFileGuard({ getSettings, dataDir });
 const files = createFiles({ guard });
@@ -100,7 +109,9 @@ async function notify({ title, body, kind = 'info', id = '' }) {
   return entry;
 }
 const calendar = createCalendar({ dataDir, notify });
+const updater = createUpdater({ app, getSettings, notify, send, logger });
 const study = createStudy({ dataDir, models });
+const writingStyle = createWritingStyle({ dataDir, models });
 const research = createResearch({ dataDir, models });
 const voice = createVoice({ rootDir, getSettings, logger });
 const registry = new ToolRegistry();
@@ -131,7 +142,11 @@ async function materialFromSelection({ documentIds = [], libraryIds = [] } = {})
   return { names, text: parts.join('\n\n') };
 }
 
-const chat = createChat({ models, registry, permissions, logger, getSettings, dataDir, path, retrieveForChat: (query, ids) => documents.retrieveContext(query, ids) });
+const images = createImages({ models, getSettings, outDir: path.join(app.getPath('documents'), 'Nexus', 'Images') });
+// Pictures picked in the file window may come from anywhere; any other picture path must be inside the allowed folders.
+const pickedPictures = new Set();
+const chatImages = { ...images, readImage: file => { if (!pickedPictures.has(path.resolve(String(file || '')))) guard.resolve(file); return images.readImage(file); } };
+const chat = createChat({ models, registry, permissions, logger, getSettings, dataDir, path, images: chatImages, retrieveForChat: (query, ids) => documents.retrieveContext(query, ids) });
 
 // Automations' prompt steps run the same agent as chat and wait for its final answer.
 function runPromptHeadless(prompt) {
@@ -150,10 +165,10 @@ const smartHome = createSmartHome({ dataDir, safeStorage, getUrl: () => getSetti
 // These are created further down, once the app's handlers exist, and are only used when a tool actually runs.
 const lateHub = { run: (...args) => hub.run(...args) };
 const lateSuggestions = { check: () => suggestionInbox.check(), status: () => suggestionInbox.status(), addRequest: async request => { const result = await suggestionInbox.addRequest(request); if (result.ok) claudeRunner.drain(); return result; } };
-registry.registerAll(buildTools({ hub: lateHub, suggestions: lateSuggestions, webInfo, smartHome, composio, notify, importAssignments: () => importD2LAssignments(), launcher, files, browser, documents, tasks, calendar, memory, research, study, automations, school, guard, getSettings, openExternal, openPath, rootDir, findStudyMaterial, documentsFolder: standardFolder, navigate: (view, extra) => send('nav:go', view, extra) }));
+registry.registerAll(buildTools({ images, writingStyle, hub: lateHub, suggestions: lateSuggestions, webInfo, smartHome, composio, notify, importAssignments: () => importD2LAssignments(), launcher, files, browser, documents, tasks, calendar, memory, research, study, automations, school, guard, getSettings, openExternal, openPath, rootDir, findStudyMaterial, documentsFolder: standardFolder, navigate: (view, extra) => send('nav:go', view, extra) }));
 registry.addDynamicProvider(context => composio.sessionTools(context));
 // Lets automated tests call a tool directly. Never set in normal use.
-if (process.env.NEXUS_TEST) globalThis.__nexus = { registry, composio };
+if (process.env.NEXUS_TEST) globalThis.__nexus = { registry, composio, get phone() { return phone; }, chat };
 
 // Every handler returns { ok:false, message } on failure rather than rejecting, so the page can always show a reason.
 function handle(channel, handler) {
@@ -278,6 +293,38 @@ async function pollSuggestions() {
   claudeRunner.drain();
 }
 if (!process.env.NEXUS_TEST) { setTimeout(pollSuggestions, 15000); setInterval(pollSuggestions, 60000); }
+// Phone control: the linked person's direct messages to the bot run through the same agent, and the answer goes back in the DM.
+function runPhoneRequest(messages) {
+  return new Promise(resolve => {
+    const made = [];
+    let test = '';
+    chat.start({ messages, workProject: { projectTitle: 'Phone' } }, event => {
+      if (event.type === 'tool_end' && event.ok && event.card?.kind === 'image') made.push(event.card.path);
+      if (event.type === 'tool_end' && event.ok && event.card?.kind === 'practice-test') test = event.card.id;
+      if (event.type === 'done') {
+        resolve({ answer: event.answer, images: made, test });
+        autoMemory.fromMessage(messages.at(-1)?.content).then(saved => { if (saved.length) send('memory:learned', saved); }).catch(() => {});
+      } else if (event.type === 'error') resolve({ answer: `That didn't work: ${event.message}` });
+      else if (event.type === 'cancelled') resolve({ answer: 'That was stopped on the PC.' });
+    }).then(started => { if (started?.ok === false) resolve({ answer: started.message || 'Nexus could not start that.' }); }).catch(error => resolve({ answer: `That didn't work: ${error.message}` }));
+  });
+}
+phone = createPhoneController({ hub, runAgent: runPhoneRequest, dataDir, logger, study });
+handle('hub:phone-status', () => phone.status());
+handle('hub:phone-link', (userId, name) => phone.link(userId, name));
+handle('hub:phone-unlink', () => phone.unlink());
+// People the bot can see in its servers, so the right account can be picked from a list.
+handle('hub:phone-people', async () => {
+  const servers = await hub.run('discord.servers');
+  if (!servers.ok) return servers;
+  const people = new Map();
+  for (const server of (servers.data || []).slice(0, 10)) {
+    const members = await hub.run('discord.members', { serverId: server.id });
+    for (const member of (members.ok ? members.data : [])) if (member.user && !member.user.bot) people.set(member.user.id, member.nick || member.user.global_name || member.user.username || member.user.id);
+  }
+  return { ok: true, people: [...people].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name)) };
+});
+if (!process.env.NEXUS_TEST) setInterval(() => phone.poll(), 8000);
 handle('calendar:google-sync', async () => {
   const accounts = await composio.activeAccounts();
   if (!accounts.some(account => /googlecalendar/i.test(account.toolkit))) return { ok: false, message: 'Connect Google Calendar in Connected Apps first.' };
@@ -321,14 +368,20 @@ ipcMain.handle('computer-mode:status', async () => {
 });
 
 // Documents
-async function pickDocumentPaths() {
-  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'], filters: [{ name: 'Documents', extensions: SUPPORTED.map(item => item.slice(1)) }] });
+async function pickDocumentPaths(withPictures = false) {
+  const documentTypes = SUPPORTED.map(item => item.slice(1));
+  const pictureTypes = Object.keys(IMAGE_TYPES).map(item => item.slice(1));
+  const filters = withPictures ? [{ name: 'Documents and pictures', extensions: [...documentTypes, ...pictureTypes] }, { name: 'Pictures', extensions: pictureTypes }, { name: 'Documents', extensions: documentTypes }] : [{ name: 'Documents', extensions: documentTypes }];
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'], filters });
   return result.canceled ? [] : result.filePaths;
 }
 // Chat attachment and study-library file picking, using the richer extractor for every format.
 ipcMain.handle('documents:pick', async () => {
-  const paths = await pickDocumentPaths();
-  if (!paths.length) return { canceled: true, documents: [] };
+  const picked = await pickDocumentPaths(true);
+  if (!picked.length) return { canceled: true, documents: [] };
+  // Pictures go to the vision model with the message instead of being read as text.
+  const pictures = picked.filter(isImagePath).slice(0, 4).map(file => { pickedPictures.add(path.resolve(file)); return { name: path.basename(file), path: file }; });
+  const paths = picked.filter(file => !isImagePath(file));
   const output = [];
   const errors = [];
   let remaining = 600000;
@@ -344,7 +397,7 @@ ipcMain.handle('documents:pick', async () => {
       output.push({ name, content: result.text, truncated: Boolean(result.truncated), pageCount: result.pages, blankPages: result.blankPages || [], textPages: result.textPages ?? (result.pages ? result.pages - (result.blankPages || []).length : undefined), notProcessedPages: result.notProcessedPages || [] });
     } catch (error) { errors.push({ name, message: String(error.message || 'Could not read this file.').slice(0, 500) }); }
   }
-  return { canceled: false, documents: output, errors };
+  return { canceled: false, documents: output, pictures, errors };
 });
 handle('documents:list', () => documents.list());
 handle('documents:add', async (folder = '') => {
@@ -400,6 +453,14 @@ handle('apps:detect', refresh => launcher.detectInstalled(refresh));
 handle('apps:pick-exe', async () => { const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'], filters: [{ name: 'Applications', extensions: ['exe', 'lnk', 'bat', 'cmd'] }] }); return result.canceled ? { canceled: true } : { canceled: false, path: result.filePaths[0] }; });
 handle('apps:pick-icon', async () => { const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'ico', 'svg', 'webp'] }] }); return result.canceled ? { canceled: true } : { canceled: false, path: result.filePaths[0] }; });
 
+// Opens a picture shown in chat in the normal Windows viewer: only picture files Nexus made, or that were picked or are in allowed folders.
+handle('documents:open-picture', async file => {
+  const full = path.resolve(String(file || ''));
+  if (!isImagePath(full)) return { ok: false, message: 'That is not a picture.' };
+  if (!pickedPictures.has(full) && !full.toLowerCase().startsWith(path.join(app.getPath('documents'), 'Nexus', 'Images').toLowerCase())) guard.resolve(full);
+  const problem = await shell.openPath(full);
+  return problem ? { ok: false, message: problem } : { ok: true };
+});
 ipcMain.handle('open-external-url', async (_event, value) => {
   try {
     const url = new URL(String(value));
@@ -490,7 +551,62 @@ handle('study:cards-due', filter => study.dueCards(filter));
 handle('study:card-review', (id, grade) => study.review(id, grade));
 handle('study:card-add', input => study.addCard(input));
 handle('study:card-remove', id => study.removeCard(id));
-handle('study:test-generate', async ({ selection, title, subject, counts, instructions }) => { const { text, names } = await materialFromSelection(selection); return { ok: true, test: await study.createTest({ title, subject, material: text, names, counts, instructions }) }; });
+// Topics found in the chosen files are kept briefly, so the test uses exactly the text that was shown.
+const topicCache = new Map();
+const askJson = async (system, user) => JSON.parse((await models.chat({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }], format: 'json', maxTokens: 900 })).content);
+handle('study:find-topics', async selection => {
+  const { text, names } = await materialFromSelection(selection);
+  if (!text.trim()) return { ok: false, message: 'Those files have no readable text.' };
+  const { topics, method } = await findTopics(text, askJson);
+  const token = require('crypto').randomUUID();
+  topicCache.set(token, { topics, names });
+  for (const key of [...topicCache.keys()].slice(0, -10)) topicCache.delete(key);
+  const course = getSettings().study.curriculum;
+  const unit = course ? curriculum.matchUnit(course, text) : null;
+  return { ok: true, token, method, topics: topics.map(({ id, title, source, text: body }) => ({ id, title, source, chars: body.length, preview: body.slice(0, 160) })), unit: unit ? { code: unit.code, title: unit.title } : null, course: course ? curriculum.COURSES[course].name : '' };
+});
+// My writing: samples in, a learned style, and writing or polishing in that style.
+handle('study:style-status', () => writingStyle.status());
+handle('study:style-add', input => writingStyle.addSample(input));
+handle('study:style-remove', id => writingStyle.removeSample(id));
+handle('study:style-learn', () => writingStyle.learn());
+handle('study:style-pick', async () => {
+  const picked = (await pickDocumentPaths()).slice(0, 6);
+  const added = [];
+  const errors = [];
+  for (const file of picked) {
+    try { const result = await readDocument(rootDir, file, MAX_STYLE_TEXT); added.push(await writingStyle.addSample({ name: path.basename(file), text: result.text })); }
+    catch (error) { errors.push(`${path.basename(file)}: ${error.message}`); }
+  }
+  return { ok: !errors.length || added.length > 0, added: added.length, message: errors.join(' ') };
+});
+const MAX_STYLE_TEXT = 20000;
+const styleRuns = new Map();
+handle('study:style-write', async ({ task, draft, length, kind, tone, requestId }) => {
+  const controller = new AbortController();
+  styleRuns.set(requestId, controller);
+  const notes = String(draft || '').trim() ? '' : (await findStudyMaterial(String(task || '')).catch(() => ({ text: '' }))).text;
+  try { return { ok: true, ...(await writingStyle.write({ task, draft, length, kind, tone, facts: notes, signal: controller.signal, onToken: text => send('study:style-token', { requestId, text }) })) }; }
+  finally { styleRuns.delete(requestId); }
+});
+handle('study:style-cancel', requestId => { styleRuns.get(requestId)?.abort(); return { ok: true }; });
+handle('study:style-save', async ({ title, text }) => {
+  const result = await registry.get?.('create_word_document')?.handler?.({ title: title || 'My writing', sections: [{ heading: '', text }] });
+  if (!result?.ok) return { ok: false, message: 'Nexus could not save the document.' };
+  shell.showItemInFolder(result.path);
+  return { ok: true, path: result.path, message: `Saved ${path.basename(result.path)} in Documents\\Nexus.` };
+});
+handle('study:curriculum', () => ({ current: getSettings().study.curriculum, courses: curriculum.courseList() }));
+handle('study:test-generate', async ({ selection, title, subject, counts, instructions, topicToken, topicIds, unitCode }) => {
+  const cached = topicToken ? topicCache.get(topicToken) : null;
+  const picked = cached ? materialFor(cached.topics, topicIds) : null;
+  const { text, names } = picked ? { text: picked.text, names: cached.names } : await materialFromSelection(selection);
+  const topics = picked && topicIds?.length && topicIds.length < cached.topics.length ? picked.titles : [];
+  const course = getSettings().study.curriculum;
+  const unit = course ? (curriculum.COURSES[course].units.find(item => item.code === unitCode) || curriculum.matchUnit(course, text)) : null;
+  const standards = unit ? curriculum.standardsPrompt(course, unit.code, topics.join(' ')) : '';
+  return { ok: true, test: await study.createTest({ title, subject, material: text, names, counts, instructions, standards, topics }) };
+});
 handle('study:d2l-sources', async subject => (await school.readD2LLibrary()).filter(item => (item.provider || 'd2l') === 'd2l' && (!subject || !item.subject || item.subject === subject)).map(({ id, title, kind, url, subject: itemSubject, updatedAt, truncated, text, course }) => ({ id, title, kind, url, subject: itemSubject, updatedAt, truncated, course: course || courseNameFrom(title), usable: d2lReadingLength(text) >= 200 })));
 handle('study:d2l-test', async ({ ids, subject, count, title, instructions }) => {
   const chosen = new Set(Array.isArray(ids) ? ids : []);
@@ -602,6 +718,10 @@ handle('system:diagnostics', async () => {
   return { app: app.getVersion(), electron: process.versions.electron, node: process.versions.node, platform: `${os.type()} ${os.release()}`, pythonModules: checks, ai, composio: composioStatus, browsers: detectBrowsers(), dataDir, secureStorage: await safeStorage.isAsyncEncryptionAvailable() };
 });
 handle('system:logs', () => logger.tail());
+handle('system:update-status', () => updater.status());
+handle('system:open-speech-settings', async () => { await shell.openExternal('ms-settings:speech'); return { ok: true }; });
+handle('system:update-check', () => updater.check({ manual: true }));
+handle('system:update-restart', () => updater.restart());
 handle('system:open-data-folder', async () => { await openPath(dataDir); return { ok: true }; });
 const BACKUP_FILES = ['settings.json', 'conversations.json', 'apps.json', 'documents.json', 'nexus-memories.json', 'work-tasks.json', 'calendar-events.json', 'reminders.json', 'flashcards.json', 'study-sets.json', 'study-guides.json', 'practice-tests.json', 'study-planner.json', 'study-mastery.json', 'research-projects.json', 'automations.json', 'd2l-settings.json', 'd2l-study-library.json'];
 handle('system:backup', async () => {
@@ -691,6 +811,7 @@ app.whenReady().then(async () => {
   startScheduler();
   automations.syncWatcher().catch(error => logger.warn(`watcher: ${error.message}`));
   automations.fireTrigger('app_start').catch(() => {});
+  updater.start();
   logger.info(`NEXUS ${app.getVersion()} started`);
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

@@ -642,6 +642,8 @@ const describeRun = reply => `${reply.actions.map(action => `${action.tool}:${ac
     // A stand-in Discord, since the real thing would post in a real server.
     const http = require('http');
     const posted = [];
+    const dm = [];
+    let dmNext = 1000;
     let flags = 0;
     const api = http.createServer((request, response) => {
       let body = '';
@@ -658,11 +660,16 @@ const describeRun = reply => `${reply.actions.map(action => `${action.tool}:${ac
         if (/^\/channels\/[\w-]+$/.test(route) && request.method === 'PATCH') { posted.push({ moved: route.split('/')[2], parent: JSON.parse(body).parent_id }); return send(200, {}); }
         if (route === '/guilds/g1/channels') return send(200, [{ id: 'c1', name: 'general', type: 0 }, { id: 'v1', name: 'voice', type: 2 }, { id: 'f1', name: 'suggestions', type: 15 }]);
         if (route === '/guilds/g1/roles') return send(200, [{ id: 'r1', name: 'Owner' }]);
-        if (route === '/guilds/g1/members') return send(200, [{ user: { id: 'u1' }, roles: ['r1'] }, { user: { id: 'u2' }, roles: [] }]);
+        if (route === '/guilds/g1/members') return send(200, [{ user: { id: 'u1' }, roles: ['r1'] }, { user: { id: 'u2' }, roles: [] }, { user: { id: '555001', username: 'mo' }, roles: [] }]);
         if (route === '/guilds/g1/threads/active') return send(200, { threads: [{ id: '200', parent_id: 'f1', name: 'Bigger goals', last_message_id: '201' }] });
         if (route === '/channels/f1/threads/archived/public') return send(200, { threads: [] });
         if (route === '/channels/200/messages' && request.method === 'POST') { posted.push({ thread: true, ...JSON.parse(body) }); return send(200, { id: '9' }); }
         if (route === '/channels/200/messages') return send(200, [{ id: '201', content: '<@77> please', mentions: [{ id: '77' }], author: { id: 'u1', username: 'ali' } }, { id: '200', content: 'Make goals bigger', author: { id: 'u1', username: 'ali' } }]);
+        if (route === '/users/@me/channels' && request.method === 'POST') return send(200, { id: 'dm1', type: 1 });
+        if (route === '/channels/dm1/typing') return send(200, {});
+        if (route === '/channels/dm1/messages' && request.method === 'POST' && /multipart/.test(request.headers['content-type'] || '')) { posted.push({ dm: true, file: /filename="[^"]+.(jpg|png|webp)"/.test(body) }); return send(200, { id: String(dmNext++) }); }
+        if (route === '/channels/dm1/messages' && request.method === 'POST') { const message = { id: String(dmNext++), content: JSON.parse(body).content, author: { id: '77', bot: true } }; dm.unshift(message); posted.push({ dm: true, content: message.content }); if (/needs your OK/.test(message.content)) dm.unshift({ id: String(dmNext++), content: 'yes', author: { id: '555001' } }); return send(200, message); }
+        if (route === '/channels/dm1/messages') return send(200, dm);
         if (route === '/channels/c1/messages' && request.method === 'POST') { posted.push(JSON.parse(body)); return send(200, { id: '9' }); }
         if (route === '/channels/c1/messages') return send(200, [{ content: 'second', author: { username: 'sam' } }, { content: 'first', author: { username: 'ali' } }]);
         return send(404, { message: 'Unknown' });
@@ -739,11 +746,51 @@ const describeRun = reply => `${reply.actions.map(action => `${action.tool}:${ac
     await page.waitForTimeout(1500);
     const inboxAfter = await invoke('hub:suggestions');
     record('asking in chat passes a game change to Claude, without claiming it is done', usedTool(gameReply, 'game_request_change') && inboxAfter.items.some(item => item.author === 'You, in Nexus' && /bounce/i.test(item.text)), describeRun(gameReply));
+    // Phone control: link by a code sent in a direct message, then a DM from that account runs on the PC.
+    posted.length = 0;
+    await page.evaluate(() => go('hub'));
+    await page.waitForSelector('#hub-discord select[aria-label="Your Discord account"] option[value="555001"]', { state: 'attached', timeout: 15000 });
+    // The panel can redraw once while it loads, so pick the account again if the first pick was lost.
+    for (let attempt = 0; attempt < 4 && !posted.some(item => item.dm); attempt++) {
+      await page.waitForTimeout(800);
+      await page.waitForSelector('#hub-discord select[aria-label="Your Discord account"] option[value="555001"]', { state: 'attached', timeout: 15000 });
+      await page.selectOption('#hub-discord select[aria-label="Your Discord account"]', '555001');
+      await page.click('#hub-discord button:has-text("Link my account")');
+      await page.waitForFunction(() => /Check Discord|first|could not/.test(document.querySelector('#hub-discord .hub-phone .status-line')?.textContent || ''), null, { timeout: 8000 }).catch(() => {});
+    }
+    const linkCode = (posted.find(item => item.dm && /code/.test(item.content))?.content.match(/\d{6}/) || [''])[0];
+    record('linking sends a code to that account in a direct message', Boolean(linkCode), JSON.stringify(posted));
+    dm.unshift({ id: String(dmNext++), content: linkCode, author: { id: 'u2' } });
+    await electronApp.evaluate(() => globalThis.__nexus.phone.poll());
+    record('someone else sending the code does not link', !(await invoke('hub:phone-status')).linked);
+    dm.unshift({ id: String(dmNext++), content: linkCode, author: { id: '555001' } });
+    await electronApp.evaluate(() => globalThis.__nexus.phone.poll());
+    await page.waitForFunction(() => /Linked to/.test(document.querySelector('#hub-discord .hub-phone')?.textContent), null, { timeout: 15000 });
+    record('replying with the code links the account, and App Control shows it', (await invoke('hub:phone-status')).linked && posted.some(item => item.dm && /Linked!/.test(item.content)));
+    posted.length = 0;
+    dm.unshift({ id: String(dmNext++), content: 'Post "Phone test works" in the general channel on my Discord server.', author: { id: 'u2' } });
+    dm.unshift({ id: String(dmNext++), content: 'Post "Sent from my phone" in the general channel on my Discord server.', author: { id: '555001' } });
+    await electronApp.evaluate(() => globalThis.__nexus.phone.poll());
+    const dmAnswer = posted.filter(item => item.dm).map(item => item.content).join(' | ');
+    record('a DM from the linked account runs on the PC and is answered in the DM; others are ignored', posted.some(item => !item.dm && /Sent from my phone/.test(item.content || '')) && !posted.some(item => /Phone test works/.test(item.content || '')) && dmAnswer.length > 0, `${JSON.stringify(posted)}`);
+    posted.length = 0;
+    dm.unshift({ id: String(dmNext++), content: 'Make a picture of a red apple on a table.', author: { id: '555001' } });
+    await electronApp.evaluate(() => globalThis.__nexus.phone.poll());
+    record('asking for a picture by DM makes it and sends the picture file back in the DM', posted.some(item => item.dm && item.file), JSON.stringify(posted));
+    await invoke('hub:phone-unlink');
+    record('unlinking stops phone control', !(await invoke('hub:phone-status')).linked);
     await page.evaluate(() => go('hub'));
     await page.waitForSelector('#hub-discord button:has-text("Disconnect")', { timeout: 15000 });
     await page.click('#hub-discord button:has-text("Disconnect")');
     await page.waitForSelector('#hub-discord input[type=password]', { timeout: 5000 });
     record('disconnecting removes the token', !fs.existsSync(path.join(temp, 'discord-bot-token.enc')));
+    // A real photo, looked at by the local vision model, then answered by the main model.
+    const apple = fs.readFileSync(path.join(__dirname, 'fixture-apple.jpg')).toString('base64');
+    const seenReply = await electronApp.evaluate(({}, data) => new Promise(resolve => {
+      const events = [];
+      globalThis.__nexus.chat.start({ messages: [{ role: 'user', content: 'What fruit is in this picture? Answer in one short sentence.', imageData: [data] }] }, event => { events.push(event.type); if (['done', 'error', 'cancelled'].includes(event.type)) resolve({ answer: event.answer || event.message, events }); });
+    }), apple);
+    record('a picture sent with a message is looked at, and the answer is about what is in it', /apple/i.test(seenReply.answer || '') && seenReply.events.includes('images_seen'), JSON.stringify(seenReply).slice(0, 300));
     await electronApp.close();
     api.close();
     await launch();
