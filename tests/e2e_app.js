@@ -82,7 +82,60 @@ const describeRun = reply => `${reply.actions.map(action => `${action.tool}:${ac
     await page.waitForFunction(() => [...document.querySelectorAll('#chat-box .user-msg')].some(item => /2 plus 2/.test(item.textContent)), null, { timeout: 8000 });
     record('the box sends the request to chat, then hides there', await page.evaluate(() => !document.getElementById('view-chat').classList.contains('hidden')) && !await page.isVisible('#ask-bar input'));
     await page.waitForFunction(() => !aiBusy, null, { timeout: 120000 });
-    record('sidebar has all 13 pages', nav.join() === 'Home,AI Chat,My Apps,Documents,Study Center,Research,Tasks,Calendar,Automations,Connected Apps,App Control,Memory,Settings', nav.join());
+    // Sections such as Quran sit just above Settings, after the 13 built-in pages.
+    record('sidebar has all 13 pages, then any sections, then Settings', nav.slice(0, 12).join() === 'Home,AI Chat,My Apps,Documents,Study Center,Research,Tasks,Calendar,Automations,Connected Apps,App Control,Memory' && nav.at(-1) === 'Settings', nav.join());
+    const viewBefore = await page.evaluate(() => document.querySelector('.view:not(.hidden)')?.id.replace('view-', ''));
+    await step('quran section', async () => {
+      const listed = await invoke('sections:list');
+      const quran = listed.sections.find(item => item.id === 'quran');
+      record('the Quran section loads as a private section that can be switched here', quran && quran.public === false && listed.editable === true && nav.includes('Quran'), JSON.stringify(listed));
+      await page.evaluate(() => go('quran'));
+      await page.waitForSelector('#view-quran .quran-ayah', { timeout: 40000 });
+      await page.selectOption('#view-quran select[aria-label="Surah"]', '112');
+      await page.waitForFunction(() => /قُلْ هُوَ/.test(document.querySelector('#view-quran .quran-ayah .quran-arabic')?.textContent || ''), null, { timeout: 40000 });
+      record('a surah opens with the Bismillah on its own and the translation under each ayah', await page.$$eval('#view-quran .quran-ayah', items => items.length) === 4 && /بِسْمِ/.test(await page.textContent('#view-quran .quran-bismillah')) && /Say, "He is Allah/.test(await page.textContent('#view-quran .quran-translation')));
+      await page.click('#view-quran .quran-tabs button[data-mode="memorize"]');
+      await page.selectOption('#view-quran select[aria-label="How much to hide"]', '3');
+      await page.waitForSelector('#view-quran .hidden-word');
+      const hidden = await page.$$eval('#view-quran .quran-word', words => [words.length, words.filter(word => word.classList.contains('hidden-word')).length]);
+      await page.click('#view-quran .hidden-word');
+      record('memorize mode hides the words, and a click shows one', hidden[0] > 5 && hidden[0] === hidden[1] && await page.$$eval('#view-quran .quran-word.revealed', words => words.length) === 1, JSON.stringify(hidden));
+      await page.click('#view-quran .quran-ayah[data-ayah="1"] button:has-text("I knew it")');
+      await page.waitForFunction(() => /1 ayah memorized/.test(document.querySelector('#view-quran .quran-summary')?.textContent || ''), null, { timeout: 8000 });
+      record('marking an ayah saves it as memorized, with a review day', /1 of 4 in this surah/.test(await page.textContent('#view-quran .quran-summary')));
+      const fake = Buffer.alloc(4000, 1).toString('base64');
+      const saved = await invoke('section:quran:save-recording', { surah: 112, from: 1, to: 4, mime: 'audio/webm', data: fake });
+      const list = await invoke('section:quran:recordings', 112);
+      record('a recording is saved on this PC by surah and ayahs, and listed', saved.surah === 112 && list.some(item => item.name === saved.name && item.from === 1 && item.to === 4), JSON.stringify(saved));
+      await invoke('section:quran:remove-recording', saved.name);
+      record('a recording can be deleted', !(await invoke('section:quran:recordings', 112)).some(item => item.name === saved.name));
+      const sound = await invoke('section:quran:audio', { reciter: 'ar.husary', id: 6222 });
+      record('a recitation downloads once and plays from this PC', fs.existsSync(sound.path) && fs.statSync(sound.path).size > 10000, sound.path);
+      // Reciting: the microphone is replaced by a stand-in that sends what Google heard for real recitations of Al-Ikhlas.
+      await electronApp.evaluate(({ ipcMain }) => { for (const name of ['recite-start', 'recite-stop']) { ipcMain.removeHandler(`section:quran:${name}`); ipcMain.handle(`section:quran:${name}`, () => ({ ok: true })); } });
+      const hear = text => electronApp.evaluate(({ BrowserWindow }, message) => BrowserWindow.getAllWindows()[0].webContents.send('section:quran:heard', { text: message }), text);
+      await page.selectOption('#view-quran select[aria-label="Ayahs"]', '1').catch(() => {});
+      await page.evaluate(() => { const [from, to] = document.querySelectorAll('#view-quran .quran-tools select'); from.value = '1'; from.dispatchEvent(new Event('change')); });
+      await page.evaluate(() => { const selects = document.querySelectorAll('#view-quran .quran-tools select'); selects[1].value = '4'; selects[1].dispatchEvent(new Event('change')); });
+      await page.selectOption('#view-quran select[aria-label="How much to hide"]', '3');
+      await page.click('#view-quran button:has-text("Recite and check")');
+      await page.waitForSelector('#view-quran button:has-text("Stop reciting")', { timeout: 5000 });
+      await hear('بسم الله الرحمن الرحيم قل هو الله احد');
+      await page.waitForFunction(() => document.querySelector('#view-quran .quran-ayah[data-ayah="1"]')?.classList.contains('recited-all'), null, { timeout: 5000 }).catch(() => {});
+      const first = await page.evaluate(() => ({ one: document.querySelector('#view-quran .quran-ayah[data-ayah="1"]').classList.contains('recited-all'), shown: [...document.querySelectorAll('#view-quran .quran-word.recited')].map(word => word.textContent), stillHidden: document.querySelectorAll('#view-quran .quran-ayah[data-ayah="2"] .hidden-word').length }));
+      record('reciting shows each word said correctly, and a Bismillah said first is ignored', first.one && first.shown.length === 4 && first.stillHidden > 0, JSON.stringify(first));
+      // A word that also comes later, said on its own, must not move the place past the words before it.
+      const jumped = await page.evaluate(() => NexusQuranMatch.followRecitation(['قُلْ', 'هُوَ', 'ٱللَّهُ', 'أَحَدٌ'].map(word => ({ forms: NexusQuranMatch.formsOf(word) })), 0, 'الله').matched.length);
+      await hear('الله الصمد لم يلد ولم يولد');
+      await hear('ولم يكن له كفوا احد');
+      await page.waitForFunction(() => /every word/.test(document.querySelector('#view-quran .quran-recite-status')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+      const finished = await page.evaluate(() => ({ status: document.querySelector('#view-quran .quran-recite-status').textContent, hidden: document.querySelectorAll('#view-quran .hidden-word').length, stopped: !!document.querySelector('#view-quran button:not(.recording)') }));
+      record('a lone repeated word does not skip ahead, and reciting every ayah shows them all and stops listening', jumped === 0 && finished.hidden === 0 && /every word/.test(finished.status), `${jumped} | ${JSON.stringify(finished)}`);
+      const letters = await page.evaluate(() => NexusQuranMatch.followRecitation([{ forms: NexusQuranMatch.formsOf('الٓمٓ') }, { forms: NexusQuranMatch.formsOf('ذَٰلِكَ') }, { forms: NexusQuranMatch.formsOf('ٱلْكِتَٰبُ') }], 0, 'الف لام ميم ذلك الكتاب'));
+      record('opening letters said as letter names, and everyday spellings, count as correct', letters.matched.join() === '0,1,2', JSON.stringify(letters));
+    });
+    // The next checks expect the page that was open before.
+    await page.evaluate(view => go(view), viewBefore);
     for (const [view] of await page.evaluate(() => NAV_ITEMS)) { await page.evaluate(v => go(v), view); await snap(`page-${view}`); }
     record('every page opens without an error', pageErrors.length === 0, pageErrors[0]);
     await page.evaluate(() => go('home'));

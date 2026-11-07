@@ -28,10 +28,12 @@ async function renderWritingTab() {
         : h('p', { class: 'muted small', text: data.samples.length ? 'Press Learn my style once your samples are in. It takes about a minute.' : '' });
 
     // Writing
-    const mode = selectBox([['write', 'Write something new'], ['polish', 'Polish my draft']], 'write', value => { draftBox.classList.toggle('hidden', value !== 'polish'); task.placeholder = value === 'polish' ? 'Anything to change? Such as: make the ending stronger (optional)' : 'What to write, with the details: the question or prompt, points to include, who it\'s for'; });
+    const PLACEHOLDERS = { write: 'What to write, with the details: the question or prompt, points to include, who it\'s for', polish: 'Anything to change? Such as: make the ending stronger (optional)', feedback: 'The assignment or question it answers (optional, but it makes the feedback better)', outline: 'The assignment or question, such as: Explain how invasive species affect biodiversity in Alberta' };
+    const LABELS = { write: 'Write it', polish: 'Polish it', feedback: 'Get feedback', outline: 'Make the outline' };
+    const mode = selectBox([['feedback', 'Get feedback on my draft'], ['outline', 'Outline it for me'], ['polish', 'Polish my draft'], ['write', 'Write something new']], 'feedback', value => { draftBox.classList.toggle('hidden', !['polish', 'feedback'].includes(value)); task.placeholder = PLACEHOLDERS[value]; writeButton.textContent = LABELS[value]; toneLabel.classList.toggle('hidden', !['write', 'polish'].includes(value)); });
     const task = h('textarea', { class: 'field', rows: 3, placeholder: 'What to write, with the details: the question or prompt, points to include, who it\'s for', 'aria-label': 'What to write', style: 'width:100%' });
     const draft = h('textarea', { class: 'field', rows: 8, placeholder: 'Paste your draft here. Nexus keeps your ideas and words, and fixes the rest.', 'aria-label': 'Your draft', style: 'width:100%' });
-    const draftBox = h('div', { class: 'hidden' }, draft);
+    const draftBox = h('div', {}, draft);
     // The tone keeps their voice but changes how relaxed or formal it is.
     let savedTone = 'usual';
     try { savedTone = localStorage.getItem('nexus.writingTone') || 'usual'; } catch {}
@@ -39,8 +41,11 @@ async function renderWritingTab() {
     tone.setAttribute('aria-label', 'Tone');
     const length = selectBox([['', 'Any length'], ['short', 'Short, about 200 words'], ['medium', 'Medium, about 400 words'], ['long', 'Long, about 850 words']], '', () => {});
     const output = h('div', { class: 'style-output hidden' });
-    const writeButton = h('button', { type: 'button', class: 'action-btn-primary', text: 'Write it' });
-    writeButton.addEventListener('click', busyButton(writeButton, 'Writing like you…', async () => {
+    const writeButton = h('button', { type: 'button', class: 'action-btn-primary', text: 'Get feedback' });
+    const toneLabel = h('label', { class: 'muted small hub-inline hidden' }, 'Tone', tone);
+    writeButton.addEventListener('click', busyButton(writeButton, 'Working…', async () => {
+        if (mode.value === 'feedback') { await showFeedback(); return; }
+        if (mode.value === 'outline') { await showOutline(); return; }
         const polishing = mode.value === 'polish';
         if (polishing && !draft.value.trim()) throw new Error('Paste your draft first.');
         if (!polishing && !task.value.trim()) throw new Error('Say what to write first.');
@@ -59,6 +64,14 @@ async function renderWritingTab() {
             live.textContent = result.text;
             if (!result.soundsLikeYou) output.append(h('p', { class: 'muted small', text: 'Add a sample of your writing above so this sounds like you.' }));
             if (result.usedNotes) output.append(h('p', { class: 'muted small', text: 'Facts came from your saved school notes on this topic.' }));
+            // After a polish, each change is listed with the reason for it, so the same mistake can be avoided next time.
+            if (polishing) {
+                const changes = h('div', { class: 'style-changes' }, h('p', { class: 'muted small', text: 'Finding what changed…' }));
+                output.append(changes);
+                call('study:style-changes', { before: draft.value, after: result.text }).then(found => {
+                    changes.replaceChildren(h('h4', { text: found.changes.length ? 'What changed and why' : 'Nothing needed changing.' }), ...found.changes.map(change => h('div', { class: 'style-change' }, h('div', { class: 'style-before', text: change.before }), h('div', { class: 'style-after', text: change.after }), change.why ? h('div', { class: 'muted small', text: change.why }) : null)), found.more ? h('p', { class: 'muted small', text: `and ${found.more} more small changes.` }) : null);
+                }).catch(() => changes.remove());
+            }
             const title = h('input', { class: 'field', type: 'text', placeholder: 'Document title', 'aria-label': 'Document title', value: task.value.split(/[.\n]/)[0].slice(0, 60) });
             output.append(h('div', { class: 'row wrap', style: 'margin-top:10px' },
                 h('button', { type: 'button', class: 'mini-button', text: 'Copy', onclick: async () => { await navigator.clipboard.writeText(result.text).catch(() => {}); toast('Copied.', 'ok'); } }),
@@ -68,13 +81,52 @@ async function renderWritingTab() {
         } finally { styleTokenOff?.(); styleTokenOff = null; }
     }));
 
+    // Feedback: the draft, with each commented sentence marked, and the comments beside it. Nothing is rewritten.
+    async function showFeedback() {
+        if (!draft.value.trim()) throw new Error('Paste your draft first.');
+        output.classList.remove('hidden');
+        output.replaceChildren(h('p', { class: 'muted', text: 'Reading your draft…' }));
+        const result = await call('study:style-feedback', { draft: draft.value, task: task.value });
+        const marked = h('div', { class: 'style-text feedback-draft' });
+        let rest = draft.value;
+        const pieces = [];
+        result.comments.forEach((item, index) => {
+            const at = rest.toLowerCase().indexOf(item.quote.toLowerCase());
+            if (at < 0) return;
+            pieces.push(rest.slice(0, at), h('mark', { class: `feedback-mark ${item.kind}`, title: item.comment, dataset: { comment: index + 1 }, text: rest.slice(at, at + item.quote.length) }), h('sup', { class: 'feedback-number', text: String(index + 1) }));
+            rest = rest.slice(at + item.quote.length);
+        });
+        pieces.push(rest);
+        marked.append(...pieces);
+        const KINDS = { clarity: 'Clarity', evidence: 'Evidence', repetition: 'Repetition', structure: 'Structure', grammar: 'Spelling and grammar', focus: 'Focus' };
+        output.replaceChildren(
+            result.strengths.length ? h('div', { class: 'feedback-strengths' }, h('b', { text: 'What works: ' }), h('span', { text: result.strengths.join(' ') })) : null,
+            h('div', { class: 'feedback-layout' }, marked, h('ol', { class: 'feedback-list' }, ...result.comments.map(item => h('li', { class: `feedback-item ${item.kind}` }, h('span', { class: 'feedback-kind', text: KINDS[item.kind] || item.kind }), h('span', { text: ` “${item.quote}”: ` }), h('span', { text: item.comment }))))),
+            result.next ? h('p', {}, h('b', { text: 'Work on next: ' }), h('span', { text: result.next })) : null,
+            h('p', { class: 'muted small', text: 'Fix these yourself, then get feedback again to see what is left.' }));
+    }
+    // Outline: a plan to write from, with facts from the saved notes.
+    async function showOutline() {
+        if (!task.value.trim()) throw new Error('Type the assignment or question first.');
+        output.classList.remove('hidden');
+        output.replaceChildren(h('p', { class: 'muted', text: 'Planning it out…' }));
+        const result = await call('study:style-outline', { task: task.value, length: length.value });
+        const asText = [`Main answer: ${result.thesis}`, ...result.sections.map((section, index) => [`${index + 1}. ${section.heading}`, ...section.points.map(point => `   - ${point}`), ...section.evidence.map(item => `   * Evidence: ${item}`)].join('\n'))].join('\n\n');
+        output.replaceChildren(
+            h('div', { class: 'outline-thesis' }, h('b', { text: 'Main answer: ' }), h('span', { text: result.thesis })),
+            h('ol', { class: 'outline-list' }, ...result.sections.map(section => h('li', {}, h('b', { text: section.heading }), h('ul', {}, ...section.points.map(point => h('li', { text: point })), ...section.evidence.map(item => h('li', { class: 'outline-evidence', text: item })))))),
+            result.tips.length ? h('p', { class: 'muted small', text: `Tips: ${result.tips.join(' ')}` }) : null,
+            h('p', { class: 'muted small', text: result.usedNotes ? 'Evidence came from your saved school notes; page numbers point back to them.' : 'No saved notes matched, so check any facts here against your notes.' }),
+            h('div', { class: 'row wrap' }, h('button', { type: 'button', class: 'mini-button', text: 'Copy outline', onclick: async () => { await navigator.clipboard.writeText(asText).catch(() => {}); toast('Copied.', 'ok'); } }), h('button', { type: 'button', class: 'mini-button', text: 'I wrote a draft: get feedback', onclick: () => { mode.value = 'feedback'; mode.dispatchEvent(new Event('change')); draft.focus(); } })));
+    }
+
     panel.replaceChildren(
         h('section', { class: 'school-card' }, h('h3', { text: 'Your writing samples' }),
             h('p', { class: 'muted small', text: 'Nexus learns how you write from these: your words, how long your sentences are, how you explain things. Use writing that is really yours, not something already fixed up by AI. Samples stay on this computer.' }),
             samples, h('div', { class: 'study-form', style: 'margin-top:10px' }, pasteName, pasteText, h('div', { class: 'row wrap' }, addPaste, addFile, h('span', { class: 'muted small', text: totalWords ? `${totalWords} words so far${totalWords < 300 ? '; more helps' : ''}` : '' })))),
         h('section', { class: 'school-card' }, h('h3', { text: 'Your style' }), learned, h('div', { class: 'row' }, learn)),
-        h('section', { class: 'school-card' }, h('h3', { text: 'Write like me' }),
-            h('p', { class: 'muted small', text: 'Writes in your voice, with the spelling and grammar fixed. Pick a tone: Serious, Chill, School, or Formal changes how relaxed it is, but it still sounds like you. You can also ask in chat, such as "write my paragraph on invasive species in my style, school tone". It uses facts from your saved school notes when it finds some on the topic, but check the facts anyway, and your teacher\'s rules on AI help before handing anything in.' }),
-            h('div', { class: 'study-form' }, h('div', { class: 'row wrap' }, mode, h('label', { class: 'muted small hub-inline' }, 'Tone', tone), length), task, draftBox, h('div', { class: 'row' }, writeButton)), output),
+        h('section', { class: 'school-card' }, h('h3', { text: 'Writing help' }),
+            h('p', { class: 'muted small', text: 'Get feedback on a draft you wrote, plan one with an outline, or polish it and see what changed and why. Write something new writes in your voice, with the spelling and grammar fixed. Pick a tone: Serious, Chill, School, or Formal changes how relaxed it is, but it still sounds like you. You can also ask in chat, such as "write my paragraph on invasive species in my style, school tone". It uses facts from your saved school notes when it finds some on the topic, but check the facts anyway, and your teacher\'s rules on AI help before handing anything in.' }),
+            h('div', { class: 'study-form' }, h('div', { class: 'row wrap' }, mode, toneLabel, length), task, draftBox, h('div', { class: 'row' }, writeButton)), output),
         status);
 }

@@ -1281,3 +1281,92 @@ test('writing tones change how relaxed or formal it is, but keep the voice', asy
   assert.match(asked.at(-1).messages[0].content, /Tone: chill[\s\S]*Here is how they actually write/);
   assert.match(asked.at(-1).messages[1].content, /in a chill tone/);
 });
+
+test('sections say whether they are public, and private ones are left out of releases', () => {
+  const { listSections, privateIds, createSections } = require('../backend/core/sections');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-sections-'));
+  const make = (id, info, files = {}) => { fs.mkdirSync(path.join(dir, id)); fs.writeFileSync(path.join(dir, id, 'section.json'), JSON.stringify(info)); for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, id, name), text); };
+  make('quran', { title: 'Quran', public: false }, { 'page.js': '', 'backend.js': "module.exports = ({ handle }) => handle('hello', () => 'hi');" });
+  make('notes', { title: 'Notes', public: true });
+  make('Bad Name', { title: 'x' });
+  assert.deepStrictEqual(listSections(dir).map(item => item.id), ['notes', 'quran']);
+  assert.deepStrictEqual(privateIds(dir), ['quran']);
+  const handlers = {};
+  const sections = createSections({ dir, sourceDir: path.dirname(dir) + '/missing', handle: (name, fn) => { handlers[name] = fn; }, context: { dataDir: dir } });
+  assert.strictEqual(handlers['section:quran:hello'](), 'hi', 'section handlers are named after the section');
+  assert.strictEqual(sections.list().editable, false);
+  assert.strictEqual(sections.setPublic('quran', true).ok, false, 'only the copy with the source can switch it');
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-source-'));
+  fs.cpSync(dir, path.join(source, 'sections'), { recursive: true });
+  const editable = createSections({ dir, sourceDir: source, handle: () => {}, context: { dataDir: dir } });
+  assert.strictEqual(editable.setPublic('quran', true).ok, true);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(source, 'sections', 'quran', 'section.json'), 'utf8')).public, true);
+  assert.deepStrictEqual(privateIds(path.join(source, 'sections')), []);
+});
+test('the release build leaves private sections out, and the owner build keeps them and stops updating from GitHub', () => {
+  const load = owner => { if (owner) process.env.NEXUS_OWNER_BUILD = '1'; else delete process.env.NEXUS_OWNER_BUILD; delete require.cache[require.resolve('../build/builder.config.js')]; return require('../build/builder.config.js'); };
+  const release = load(false);
+  const privateOnes = require('../backend/core/sections').privateIds(path.join(__dirname, '..', 'sections'));
+  for (const id of privateOnes) assert.ok(release.files.includes(`!sections/${id}/**`), id);
+  assert.strictEqual(release.extraMetadata, undefined);
+  const mine = load(true);
+  assert.ok(!mine.files.some(item => item.startsWith('!sections')));
+  assert.strictEqual(mine.extraMetadata.nexusOwner, true);
+  assert.strictEqual(mine.directories.output, 'dist-mine');
+  delete process.env.NEXUS_OWNER_BUILD;
+});
+test('quran ayahs are kept apart from the Bismillah, and memorizing schedules reviews', async () => {
+  const quran = require('../sections/quran/backend.js');
+  const handlers = {};
+  const reply = data => ({ ok: true, json: async () => ({ code: 200, data }) });
+  const bism = '\uFEFFبِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ';
+  let now = 1e12;
+  const fetchFn = async url => (/surah\/112/.test(url) ? reply([{ name: 'الإخلاص', englishName: 'Al-Ikhlaas', englishNameTranslation: 'Sincerity', revelationType: 'Meccan', ayahs: [{ number: 6222, numberInSurah: 1, text: 'بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ قُلْ هُوَ ٱللَّهُ أَحَدٌ', juz: 30 }, { number: 6223, numberInSurah: 2, text: 'ٱللَّهُ ٱلصَّمَدُ', juz: 30 }] }, { ayahs: [{ text: 'Say, He is Allah, One' }, { text: 'Allah, the Eternal Refuge' }] }]) : reply([{ name: 'الفاتحة', englishName: 'Al-Faatiha', ayahs: [{ number: 1, numberInSurah: 1, text: bism }] }, { ayahs: [{ text: 'In the name of Allah' }] }]));
+  quran({ handle: (name, fn) => { handlers[name] = fn; }, folder: fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-quran-')), fetchFn, now: () => now });
+  const ikhlas = await handlers.surah(112);
+  assert.strictEqual(ikhlas.ayahs[0].text, 'قُلْ هُوَ ٱللَّهُ أَحَدٌ');
+  assert.ok(ikhlas.bismillah);
+  const fatiha = await handlers.surah(1);
+  assert.strictEqual(fatiha.bismillah, '', 'in Al-Fatiha the Bismillah is ayah 1');
+  assert.match(fatiha.ayahs[0].text, /^بِسْمِ/);
+  let progress = await handlers.mark({ surah: 112, ayahs: [1], result: 'good' });
+  assert.strictEqual(progress.memorized, 1);
+  assert.deepStrictEqual(progress.due, []);
+  now += 2 * 86400000;
+  progress = await handlers.progress();
+  assert.deepStrictEqual(progress.due, ['112:1'], 'it comes back for review after a day');
+  progress = await handlers.mark({ surah: 112, ayahs: [1], result: 'good' });
+  assert.ok(progress.ayahs['112:1'].interval > 1, 'each good review spaces the next one further out');
+  progress = await handlers.mark({ surah: 112, ayahs: [1], result: 'again' });
+  assert.strictEqual(progress.memorized, 0);
+  await assert.rejects(handlers['save-recording']({ surah: 112, from: 1, to: 1, data: '' }), /empty/);
+  await assert.rejects(handlers['remove-recording']('../../evil.txt'), /Unknown/);
+});
+test('a unit laid out by outcomes is read by outcome, with its pages and answers', () => {
+  const { outlineTopics, pickTopic } = require('../backend/study/topics');
+  const { extractRequestedDocumentContext } = require('../backend/ai/documentContext');
+  const para = word => `${word} is explained here in full sentences so the reading has real content to study. `.repeat(4);
+  const doc = [
+    '[PDF PAGE 1]', 'Objective 1   1', 'There are two main objectives to this unit', '-Objective 1: To interpret diversity among species', '-Objective 2: To explain reproduction', '',
+    '[PDF PAGE 2]', 'Objective 1   2', '-Outcome 1A: Define biodiversity, species, and', 'population', para('Biodiversity'), '1. What is a species?',
+    '[PDF PAGE 3]', '-Outcome 1B: Identify examples of niches', para('A niche'),
+    '[PDF PAGE 4]', 'Objective 2: To explain reproduction', '-Outcome 2A: Distinguish mitosis and meiosis', '-Outcome 2B: Describe asexual reproduction', '', '', '', para('Mitosis'),
+    '[PDF PAGE 5]', '-Outcome 2B: Describe asexual reproduction', para('Budding'),
+    '[PDF PAGE 6]', 'ANSWER KEY                1', '-Outcome 1A: Define biodiversity', '1) A group that can breed', '-Outcome 2B: Describe asexual reproduction', '3) Budding'
+  ].join('\n');
+  const topics = outlineTopics(`SOURCE: Unit\n${doc}`);
+  assert.deepStrictEqual(topics.map(topic => topic.code), ['1A', '1B', '2A', '2B']);
+  assert.strictEqual(topics[0].title, '1A: Define biodiversity, species, and population', 'a wrapped heading keeps its second line');
+  assert.deepStrictEqual(topics.find(topic => topic.code === '2A').pages, [4, 4]);
+  assert.match(topics.find(topic => topic.code === '2A').text, /Mitosis is explained/, 'an outcome only named in a list starts right after the list');
+  assert.doesNotMatch(topics.find(topic => topic.code === '2B').text, /ANSWER KEY|A group that can breed/, 'the answer key is kept out of the reading');
+  assert.match(topics.find(topic => topic.code === '2B').answers, /Budding/);
+  assert.match(topics[0].parent, /^Objective 1/);
+  assert.deepStrictEqual(pickTopic(topics, 'quiz me on outcome 2b').map(topic => topic.code), ['2B']);
+  assert.deepStrictEqual(pickTopic(topics, 'explain niches').map(topic => topic.code), ['1B']);
+  assert.deepStrictEqual(pickTopic(topics, 'what is going on'), []);
+  const context = extractRequestedDocumentContext('read 1B', `FILE: Unit\n${doc}`);
+  assert.match(context, /TOPIC 1B: Identify examples of niches \(pages 3 to 3\)/);
+  assert.doesNotMatch(context, /Mitosis is explained/);
+  assert.match(extractRequestedDocumentContext('read outcome 5D', `FILE: Unit\n${doc}`), /no 5D among them/);
+});

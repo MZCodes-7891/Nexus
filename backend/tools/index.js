@@ -1,5 +1,75 @@
 const path = require('path');
-const { splitTopics, materialFor } = require('../study/topics');
+const { splitTopics, materialFor, outlineTopics, pickTopic } = require('../study/topics');
+const { formatTopics } = require('../ai/documentContext');
+
+// Unit documents laid out by outcomes (1A, 1B, ... 4C), found among the saved documents and study library.
+// Each document's outline is worked out once and kept until the document changes.
+const unitOutlines = new Map();
+async function findUnits(s, request = '') {
+  const docs = (await s.documents.list().catch(() => [])).filter(doc => /\.(pdf|docx?|pptx|txt|md)$/i.test(doc.name || ''));
+  const library = (await s.school.readD2LLibrary().catch(() => [])).filter(item => String(item.text || '').length > 2000);
+  const sources = [
+    ...docs.map(doc => ({ key: `doc:${doc.id}:${doc.updatedAt || doc.addedAt || doc.size || ''}`, name: doc.name, load: async () => (await s.documents.readText(doc.id, 600000)).text })),
+    ...library.map(item => ({ key: `lib:${item.id}:${item.updatedAt || ''}`, name: item.title, load: async () => item.text }))
+  ];
+  const units = [];
+  for (const source of sources.slice(0, 40)) {
+    if (!unitOutlines.has(source.key)) unitOutlines.set(source.key, outlineTopics(`SOURCE: ${source.name}\n${await source.load().catch(() => '')}`));
+    const topics = unitOutlines.get(source.key);
+    if (topics.length >= 3) units.push({ name: source.name, topics });
+  }
+  // A unit named in the request, such as "biological diversity", comes first.
+  const words = String(request).toLowerCase().match(/[a-z]{5,}/g) || [];
+  const named = unit => words.filter(word => unit.name.toLowerCase().includes(word) || unit.topics.some(topic => (topic.parent || '').toLowerCase().includes(word))).length;
+  for (const unit of units) unit.named = named(unit);
+  return units.sort((a, b) => b.named - a.named);
+}
+// A study plan from now until a test: one or more of the unit's topics each day, weakest first, then a full review the day before.
+async function planExam(s, { unit: unitName = '', date, subject = '', time = '17:00' }) {
+  const when = new Date(String(date || '').length <= 10 ? `${date}T12:00:00` : date);
+  if (Number.isNaN(when.getTime())) throw new Error('Say the date of the test, such as 2026-11-20 or "next Friday".');
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.floor((new Date(when.getFullYear(), when.getMonth(), when.getDate()) - today) / 86400000);
+  if (days < 1) throw new Error('The test has to be at least a day away to plan for it.');
+  const units = await findUnits(s, unitName);
+  const unit = units[0];
+  if (!unit) throw new Error('No unit document with topics was found. Add the unit PDF in Documents first.');
+  // How well each outcome is known, from quiz and test results: unknown sits between weak and strong.
+  const mastery = new Map((await s.study.weakTopics().catch(() => [])).map(item => [String(item.topic).match(/\b(\d{1,2}[A-Z])\b/)?.[1] || item.topic, item.accuracy]));
+  const ranked = unit.topics.map(topic => ({ topic, score: mastery.has(topic.code) ? mastery.get(topic.code) : 75 })).sort((a, b) => a.score - b.score).map(item => item.topic);
+  const studyDays = Math.max(1, days - 1);
+  const perDay = Math.ceil(ranked.length / studyDays);
+  const [hours, minutes] = String(time).split(':').map(Number);
+  const at = dayOffset => { const day = new Date(today); day.setDate(day.getDate() + dayOffset); day.setHours(hours || 17, minutes || 0, 0, 0); return day; };
+  const sessions = [];
+  for (let day = 1, index = 0; index < ranked.length; day++) {
+    const todays = ranked.slice(index, index + perDay);
+    index += perDay;
+    sessions.push({ day, topics: todays, when: at(Math.min(day, studyDays)) });
+  }
+  // Spare days go to a second pass over the weakest topics.
+  for (let day = sessions.length + 1, index = 0; day < days && index < ranked.length; day++, index += perDay) sessions.push({ day, topics: ranked.slice(index, index + perDay), when: at(day), review: true });
+  const name = unit.name.replace(/\.(pdf|docx?)$/i, '').replace(/^\d+--Print;\s*/i, '');
+  for (const session of sessions) {
+    const title = `${session.review ? 'Review' : 'Study'} ${session.topics.map(topic => topic.code).join(', ')}: ${session.topics.map(topic => topic.title.replace(/^\w+: /, '')).join('; ').slice(0, 90)}`;
+    await s.study.addPlannerItem({ kind: 'session', title, when: session.when.toISOString(), minutes: 30 * session.topics.length, subject });
+    await s.calendar.addEvent({ title, start: session.when.toISOString(), minutes: 30 * session.topics.length, kind: 'study' }).catch(() => {});
+  }
+  const review = at(days - 1);
+  await s.study.addPlannerItem({ kind: 'session', title: `Full review for the ${name} test: a quiz on the whole unit`, when: review.toISOString(), minutes: 45, subject });
+  await s.calendar.addEvent({ title: `Full review: ${name}`, start: review.toISOString(), minutes: 45, kind: 'study' }).catch(() => {});
+  await s.study.addPlannerItem({ kind: 'test', title: `${name} unit test`, when: when.toISOString(), subject });
+  await s.calendar.addEvent({ title: `${name} unit test`, start: when.toISOString(), minutes: 60, kind: 'test' }).catch(() => {});
+  return { unit: name, days, sessions: sessions.map(session => ({ date: session.when.toDateString(), topics: session.topics.map(topic => topic.title), review: Boolean(session.review) })), weakFirst: ranked.filter(topic => mastery.has(topic.code) && mastery.get(topic.code) < 70).map(topic => topic.code) };
+}
+
+function pickUnitTopics(units, request, wholeUnit = false) {
+  for (const unit of units) {
+    const topics = wholeUnit ? unit.topics : pickTopic(unit.topics, request);
+    if (topics.length) return { unit, topics };
+  }
+  return null;
+}
 const curriculum = require('../study/curriculum');
 const os = require('os');
 const fs = require('fs');
@@ -117,13 +187,34 @@ function buildTools(s) {
       go('school', { tab: 'guides', id: guide.id });
       return { ok: true, id: guide.id, title: guide.title, sources: found.names, message: `Saved the study guide "${guide.title}" in the Study Center.`, preview: guide.content.slice(0, 1200), card: { kind: 'study-guide', id: guide.id, title: guide.title } };
     } },
+    { name: 'focus_start', title: 'Start a focus session', category: 'productivity', risk: 'write', keywords: ['focus', 'focus mode', 'focus session', 'pomodoro', 'no distractions', 'block distractions', 'study timer', 'concentrate'], description: 'Start a focus session: for the given minutes, Nexus closes the user’s distracting apps (set on the Study Center Planner) whenever they open and pauses notifications. Use stop to end one early.', parameters: params({ minutes: { type: 'number', description: 'Length in minutes, default 25' }, stop: { type: 'boolean', description: 'True to end the current session' } }), handler: async args => {
+      const result = args.stop ? await s.focus.stop() : await s.focus.start({ minutes: args.minutes });
+      return { ok: true, message: result.on ? `Focus session on for ${result.minutes} minutes. Closing ${result.apps.join(', ')} if they open; notifications are paused.` : 'Focus session ended.' };
+    } },
+    { name: 'study_plan_exam', title: 'Plan for a test', category: 'study', risk: 'write', keywords: ['test on', 'exam on', 'unit test', 'study plan', 'plan my studying', 'countdown', 'prepare for', 'test is on', 'test next', 'quiz on friday'], description: 'Make a day-by-day study plan until a test: each day covers some of the unit\'s outcomes, weakest first from the user\'s quiz results, with a full review the day before. Adds the sessions to the Study Center planner and the calendar. Use when the user says they have a test or exam on a date.', parameters: params({ unit: str('The unit, such as "biological diversity"'), date: str('The test date as YYYY-MM-DD'), subject: str('Class, such as Science'), time: str('Time of day to study, HH:MM, default 17:00') }, ['date']), handler: async args => {
+      const plan = await planExam(s, args);
+      go('school');
+      return { ok: true, message: `Planned ${plan.sessions.length} study sessions over ${plan.days} days for the ${plan.unit} test${plan.weakFirst.length ? `, starting with your weakest: ${plan.weakFirst.join(', ')}` : ''}, plus a full review the day before. They are in the Study Center planner and the calendar:\n${plan.sessions.map(session => `- ${session.date}: ${session.review ? 'review ' : ''}${session.topics.join('; ')}`).join('\n')}` };
+    } },
+    { name: 'study_read_topic', title: 'Read a topic', category: 'study', risk: 'read', keywords: ['topic', 'outcome', 'objective', 'read', 'explain', 'summarize', 'summary', 'notes on', 'teach me', 'go over', 'review', 'what does', 'unit', 'worksheet', 'answers', 'answer key'], description: 'Read one topic of the user\'s unit document, such as "Outcome 2B", "topic 3A", or "the niches topic", from their saved documents, with its page numbers and its part of the answer key. Use it whenever the user asks to read, explain, summarize, review, or be quizzed on a topic or outcome of their unit. Then do what they asked using only that text, and give page numbers.', parameters: params({ topic: str('The topic as the user said it, such as "2B" or "niches"'), unit: str('The unit or document name if the user gave one, such as "biological diversity"') }, ['topic']), handler: async args => {
+      const units = await findUnits(s, `${args.unit || ''} ${args.topic}`);
+      if (!units.length) return { ok: false, error: 'No unit document with numbered outcomes or topics was found in the saved documents. Ask the user to add the unit PDF in Documents (Add files) or the Study Center library first.' };
+      // Several units can each have a 2B; without a unit named, NEXUS asks which one.
+      const having = units.filter(unit => pickTopic(unit.topics, args.topic).length);
+      if (having.length > 1 && !having[0].named) return { ok: false, error: `More than one unit has that topic: ${having.map(unit => unit.name).join('; ')}. Ask the user which unit they mean.` };
+      const picked = pickUnitTopics(units, args.topic);
+      if (!picked) return { ok: false, error: `"${args.topic}" did not match a topic. The topics in ${units[0].name} are: ${units[0].topics.map(topic => topic.title).join('; ')}. Ask which one they mean.` };
+      return { ok: true, message: `From "${picked.unit.name}". Use only this text to do what the user asked, and give page numbers. When quizzing, ask one question at a time and check the answer against the answer key.\n\n${formatTopics(picked.topics, 14000)}` };
+    } },
     { name: 'study_create_test', title: 'Make a practice test', category: 'study', keywords: ['practice test', 'test me', 'quiz me', 'unit test', 'mock test', 'exam', 'pat', 'test on', 'questions on', 'prepare for my test', 'study for my test'], description: 'Make a practice test from the user\'s saved school documents, on one topic or on a whole unit, written to test the curriculum outcomes (Alberta/CBE) the way real tests do. Use whenever the user asks to be tested or quizzed, or asks for practice questions or a unit test. Then tell them how many questions it has and that they can take it in the Study Center, or answer here if they are on their phone.', parameters: params({ topic: str('The topic to test, such as "mitosis and meiosis", or the unit name for a unit test'), unit_test: { type: 'boolean', description: 'True for a test on the whole unit, covering every topic' }, count: { type: 'number', description: 'Number of questions, 5 to 20. Default 10.' }, subject: str('Class, such as Science') }, ['topic']), handler: async (args, context) => {
-      const found = await s.findStudyMaterial(args.topic, args.subject);
+      const units = await findUnits(s, args.topic);
+      const coded = pickUnitTopics(units, args.topic, Boolean(args.unit_test) && units.length > 0 && /[a-z]{5,}/i.test(args.topic) && units[0].name.toLowerCase().includes((String(args.topic).toLowerCase().match(/[a-z]{5,}/) || [''])[0]));
+      const found = coded ? { text: coded.topics.map(topic => `SOURCE: ${coded.unit.name} — ${topic.title}\n${topic.text}`).join('\n\n'), names: [coded.unit.name] } : await s.findStudyMaterial(args.topic, args.subject);
       if (!found.text) return { ok: false, error: `No saved school material was found for "${args.topic}". Ask the user to add the unit document in the Study Center or Documents first.` };
-      const parts = splitTopics(found.text);
+      const parts = coded ? coded.topics : splitTopics(found.text);
       const words = String(args.topic).toLowerCase().match(/[a-z]{4,}/g) || [];
       const score = part => words.reduce((sum, word) => sum + (part.title.toLowerCase().includes(word) ? 4 : 0) + Math.min(3, part.text.toLowerCase().split(word).length - 1), 0);
-      const matching = args.unit_test ? [] : parts.map(part => ({ part, points: score(part) })).filter(item => item.points >= 3).sort((a, b) => b.points - a.points).slice(0, 3).map(item => item.part);
+      const matching = coded && !args.unit_test ? coded.topics : args.unit_test ? [] : parts.map(part => ({ part, points: score(part) })).filter(item => item.points >= 3).sort((a, b) => b.points - a.points).slice(0, 3).map(item => item.part);
       const material = matching.length ? materialFor(matching, matching.map(part => part.id)).text : found.text;
       const topics = args.unit_test ? [] : matching.length ? matching.map(part => part.title) : [args.topic];
       const course = getSettings().study?.curriculum;
@@ -313,4 +404,4 @@ async function createGoogleFile(s, { toolkit, label, slug, title, markdown, base
   } catch (error) { return { ok: false, error: `${label} could not create this: ${String(error.message).slice(0, 300)}` }; }
 }
 
-module.exports = { buildTools, googleLinkFrom, slidesToMarkdown };
+module.exports = { planExam, findUnits, buildTools, googleLinkFrom, slidesToMarkdown };

@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const loaded = await ipcRenderer.invoke('settings:get');
     appSettings = loaded.settings;
     applyAppearance(appSettings);
+    await loadSections();
     try { await loadConversations(); } catch (error) { toast(`Could not load conversations: ${error.message}`, 'error'); }
     initializeProjects();
     try {

@@ -320,7 +320,45 @@ async function renderPlannerTab() {
         list.replaceChildren(...(items.length ? items.sort((a, b) => String(a.when || '9').localeCompare(String(b.when || '9'))).map(item => h('div', { class: 'doc-row' }, h('input', { type: 'checkbox', checked: item.done, 'aria-label': `Mark ${item.title} done`, onchange: async event => { await call('study:planner-update', item.id, { done: event.target.checked }); refresh(); } }), h('div', { class: 'grow' }, h('div', { class: `doc-title${item.done ? ' task-done' : ''}`, text: item.title }), h('div', { class: 'doc-meta', text: [item.kind, item.subject, item.when ? formatWhen(item.when) : '', item.minutes ? `${item.minutes} min` : ''].filter(Boolean).join(' · ') })), h('button', { type: 'button', class: 'mini-button danger', text: 'Delete', onclick: async () => { await call('study:planner-remove', item.id); refresh(); } }))) : [emptyState('Your plan is empty.')]));
     };
     const add = h('button', { type: 'button', class: 'action-btn-primary', text: 'Add to plan', onclick: async () => { try { await call('study:planner-add', { kind: kind.value, title: title.value, when: when.value, minutes: Number(minutes.value), subject: subject.value }); title.value = ''; when.value = ''; refresh(); toast('Added. Dated items also appear on the calendar.', 'ok'); } catch (error) { toast(error.message, 'error'); } } });
-    panel.replaceChildren(h('section', { class: 'school-card study-form' }, h('div', { class: 'study-form-row' }, kind, title, when, minutes, subject), h('div', { class: 'row' }, add)), h('h3', { class: 'section-title', text: 'Study next' }), priorities, h('h3', { class: 'section-title', text: 'Plan' }), list);
+    // Plan for a test: study sessions from now until the test, weakest outcomes first.
+    const units = await ipcRenderer.invoke('study:units').catch(() => []);
+    const examUnit = h('select', { class: 'field', 'aria-label': 'Unit' }, ...(units.length ? units.map(unit => h('option', { value: unit.name, text: `${unit.name.replace(/.(pdf|docx?)$/i, '').replace(/^d+--Print;s*/i, '')} (${unit.topics} topics)` })) : [h('option', { value: '', text: 'Add a unit document in Documents first' })]));
+    const examDate = h('input', { class: 'field', type: 'date', 'aria-label': 'Test date' });
+    const examTime = h('input', { class: 'field', type: 'time', value: '17:00', 'aria-label': 'Study time each day' });
+    const examResult = h('div', { class: 'muted small status-line', role: 'status' });
+    const planIt = h('button', { type: 'button', class: 'action-btn-primary', text: 'Make my study plan' });
+    planIt.addEventListener('click', busyButton(planIt, 'Planning…', async () => {
+        if (!examUnit.value || !examDate.value) throw new Error('Choose the unit and the test date.');
+        const result = await call('study:plan-exam', { unit: examUnit.value, date: examDate.value, time: examTime.value, subject: 'Science' });
+        examResult.textContent = result.message; examResult.dataset.kind = 'ok';
+        await refresh();
+    }));
+    // Focus session: a timer that closes distracting apps when they open and pauses notifications.
+    const focusBox = h('section', { class: 'school-card study-form focus-card' });
+    let focusTimer = null;
+    const drawFocus = async () => {
+        clearInterval(focusTimer);
+        const status = await ipcRenderer.invoke('system:focus-status');
+        if (status.on) {
+            const left = h('b', { class: 'focus-left' });
+            const tick = () => { const ms = Math.max(0, status.endsAt - Date.now()); left.textContent = `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')} left`; if (!ms || !focusBox.isConnected) { clearInterval(focusTimer); if (focusBox.isConnected) setTimeout(drawFocus, 1500); } };
+            tick(); focusTimer = setInterval(tick, 1000);
+            focusBox.replaceChildren(h('h3', { text: 'Focus session on' }), h('div', { class: 'row wrap' }, left, h('span', { class: 'muted small', text: `Closing ${status.apps.join(', ')} if they open. Notifications are paused.` }), h('button', { type: 'button', class: 'mini-button', text: 'End early', onclick: async () => { await ipcRenderer.invoke('system:focus-stop'); drawFocus(); } })));
+            return;
+        }
+        const minutes = h('input', { class: 'field', type: 'number', min: 5, max: 240, value: appSettings.focus?.minutes || 25, 'aria-label': 'Minutes', style: 'width:90px' });
+        const running = await ipcRenderer.invoke('system:running-apps').catch(() => []);
+        const names = [...new Set([...(appSettings.focus?.apps || []), ...running.filter(name => !/^(NEXUS|electron|explorer|Code|ApplicationFrameHost|TextInputHost|SystemSettings)$/i.test(name))])];
+        const checks = names.map(name => h('label', { class: 'muted small hub-inline' }, h('input', { type: 'checkbox', checked: (appSettings.focus?.apps || []).includes(name), dataset: { app: name } }), name));
+        const start = h('button', { type: 'button', class: 'action-btn-primary', text: 'Start focusing' });
+        start.addEventListener('click', busyButton(start, 'Starting…', async () => { await call('system:focus-start', { minutes: Number(minutes.value), apps: checks.map(label => label.querySelector('input')).filter(box => box.checked).map(box => box.dataset.app) }); appSettings = (await ipcRenderer.invoke('settings:get')).settings; drawFocus(); }));
+        focusBox.replaceChildren(h('h3', { text: 'Focus session' }), h('p', { class: 'muted small', text: 'For the time you set, Nexus closes the apps you tick whenever they open, and pauses Windows notifications. Apps get the chance to save first.' }), h('div', { class: 'row wrap' }, minutes, h('span', { class: 'muted small', text: 'minutes' }), start), h('div', { class: 'row wrap' }, ...checks));
+    };
+    drawFocus();
+    panel.replaceChildren(
+        focusBox,
+        h('section', { class: 'school-card study-form' }, h('h3', { text: 'Plan for a test' }), h('p', { class: 'muted small', text: 'Spreads the unit’s outcomes over the days before the test, weakest first from your quiz results, with a full review the day before. Each session goes in this planner and your calendar.' }), h('div', { class: 'study-form-row' }, examUnit, examDate, h('label', { class: 'muted small hub-inline' }, 'Study at', examTime)), h('div', { class: 'row' }, planIt), examResult),
+        h('section', { class: 'school-card study-form' }, h('div', { class: 'study-form-row' }, kind, title, when, minutes, subject), h('div', { class: 'row' }, add)), h('h3', { class: 'section-title', text: 'Study next' }), priorities, h('h3', { class: 'section-title', text: 'Plan' }), list);
     await refresh();
 }
 
@@ -343,12 +381,13 @@ function openStudyTab(tab, options = {}) {
     studyTabSelect(tab, options);
 }
 function bindStudy() {
-    const PANELS = { sets: 'Study sets', d2l: 'D2L Practice', assignments: 'Assignments', library: 'Library', guides: 'Study guides', flashcards: 'Flashcards', tests: 'Practice tests', writing: 'My writing', quiz: 'Quiz', planner: 'Planner', progress: 'Progress' };
+    const PANELS = { quizzes: 'Quizzes', sets: 'Study sets', d2l: 'D2L Practice', assignments: 'Assignments', library: 'Library', guides: 'Study guides', flashcards: 'Flashcards', tests: 'Practice tests', writing: 'My writing', quiz: 'Quiz', planner: 'Planner', progress: 'Progress' };
     let tabOptions = {};
     const select = tabs('study-tabs', Object.entries(PANELS), async id => {
         for (const key of Object.keys(PANELS)) document.getElementById(`study-tab-${key}`).classList.toggle('hidden', key !== id);
         const options = tabOptions; tabOptions = {};
         try {
+            if (id === 'quizzes') await renderQuizzesTab();
             if (id === 'sets') await renderSetsTab(options.id);
             if (id === 'd2l') await renderD2LPracticeTab();
             if (id === 'assignments') await renderAssignmentsTab();

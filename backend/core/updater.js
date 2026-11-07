@@ -1,11 +1,11 @@
 // Keeps installed copies up to date from the NEXUS releases on GitHub. A new version downloads in the background and installs the next time NEXUS closes, or right away if the person presses Restart.
 const CHECK_EVERY_MS = 4 * 60 * 60000;
 
-function createUpdater({ app, getSettings, notify, send, logger, loadUpdater = () => require('electron-updater').autoUpdater }) {
+function createUpdater({ app, getSettings, notify, send, logger, ownerBuild = false, loadUpdater = () => require('electron-updater').autoUpdater }) {
   let updater = null;
   let state = { status: 'idle', message: '', version: '' };
   const set = changes => { state = { ...state, ...changes }; send?.('system:update-status', state); };
-  const enabled = () => app.isPackaged && !process.env.NEXUS_TEST && getSettings().general.autoUpdate !== false;
+  const enabled = () => app.isPackaged && !ownerBuild && !process.env.NEXUS_TEST && getSettings().general.autoUpdate !== false;
 
   function load() {
     if (updater) return updater;
@@ -29,6 +29,7 @@ function createUpdater({ app, getSettings, notify, send, logger, loadUpdater = (
 
   async function check({ manual = false } = {}) {
     if (!app.isPackaged || process.env.NEXUS_TEST) return { ok: false, ...state, message: 'Updates only work in the installed NEXUS app.' };
+    if (ownerBuild) return { ok: false, ...state, message: 'This is your own build, with your private sections, so it updates when Claude installs a new one rather than from GitHub.' };
     if (!manual && !enabled()) return { ok: false, ...state };
     try { await load().checkForUpdates(); return { ok: true, ...state }; }
     catch (error) { logger?.warn(`update check: ${error.message}`); return { ok: false, ...state }; }
@@ -44,7 +45,7 @@ function createUpdater({ app, getSettings, notify, send, logger, loadUpdater = (
     setImmediate(() => updater.quitAndInstall(true, true));
     return { ok: true };
   }
-  return { start, check, restart, status: () => ({ ...state, current: app.getVersion(), enabled: enabled() }) };
+  return { start, check, restart, status: () => ({ ...state, ...(ownerBuild && !state.message ? { message: `Version ${app.getVersion()}, your own build with private sections. It updates when Claude installs a new one, not from GitHub.` } : {}), current: app.getVersion(), enabled: enabled(), ownerBuild }) };
 }
 
 module.exports = { createUpdater };

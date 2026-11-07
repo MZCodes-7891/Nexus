@@ -177,7 +177,9 @@ function createPhoneController({ hub, runAgent, dataDir, logger, study, now = ()
     } catch (error) { logger?.warn(`phone controller: ${error.message}`); }
     finally { polling = false; }
   }
-  return { link, unlink, status, poll, confirm, isRunning: () => running };
+  // Sends a note to the linked phone, such as a reminder, when an account is linked.
+  async function tell(text) { const state = await read(); if (!state.verified || !String(text || '').trim()) return { ok: false }; await say(state.channelId, String(text).slice(0, 1800)); return { ok: true }; }
+  return { link, unlink, status, poll, confirm, tell, isRunning: () => running };
 }
 
 module.exports = { createPhoneController };

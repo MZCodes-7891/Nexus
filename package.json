@@ -1,21 +1,23 @@
 {
   "name": "nexus",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "npm run build:helper && electron-builder --publish never",
+    "build": "npm run build:helper && electron-builder --config build/builder.config.js --publish never",
     "test": "node --test tests/unit.test.js",
     "test:app": "node tests/e2e_app.js",
     "test:live": "node tests/e2e_live.js",
     "test:setup": "node tests/setup_check.js",
-    "build:dir": "npm run build:helper && electron-builder --dir",
-    "build:helper": "python -m PyInstaller --noconfirm --clean --log-level WARN --distpath %LOCALAPPDATA%/nexus-build/dist --workpath %LOCALAPPDATA%/nexus-build/work --specpath %LOCALAPPDATA%/nexus-build --name nexus-helper --paths . --collect-data speech_recognition --collect-all pyttsx3 --hidden-import comtypes.stream --hidden-import pyttsx3.drivers.sapi5 --exclude-module customtkinter --exclude-module openai --exclude-module tkinter --exclude-module docx nexus_helper.py"
+    "build:dir": "npm run build:helper && electron-builder --config build/builder.config.js --dir",
+    "build:helper": "python -m PyInstaller --noconfirm --clean --log-level WARN --distpath %LOCALAPPDATA%/nexus-build/dist --workpath %LOCALAPPDATA%/nexus-build/work --specpath %LOCALAPPDATA%/nexus-build --name nexus-helper --paths . --collect-data speech_recognition --collect-all pyttsx3 --hidden-import comtypes.stream --hidden-import pyttsx3.drivers.sapi5 --exclude-module customtkinter --exclude-module openai --exclude-module tkinter --exclude-module docx nexus_helper.py",
+    "build:mine": "npm run build:helper && node build/owner-build.js"
   },
   "dependencies": {
     "@composio/core": "^0.27.0",
     "electron-updater": "^6.8.11",
     "playwright-core": "^1.64.1",
+    "qrcode": "^1.5.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -34,7 +36,8 @@
       "backend/**",
       "frontend/**",
       "build/icon.*",
-      "package.json"
+      "package.json",
+      "frontend-phone/**"
     ],
     "productName": "NEXUS",
     "win": {

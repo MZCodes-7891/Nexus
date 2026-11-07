@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050b18">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="NEXUS">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>NEXUS</title>
+<style>
+  :root { --bg:#050b18; --panel:#0e1c36; --line:rgba(125,180,255,.16); --text:#eaf3ff; --dim:#93a8c6; --accent:#38bdf8; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:16px/1.5 'Segoe UI', system-ui, -apple-system, sans-serif; }
+  body { display:flex; flex-direction:column; }
+  header { padding:calc(env(safe-area-inset-top) + 12px) 16px 10px; display:flex; align-items:center; gap:10px; border-bottom:1px solid var(--line); }
+  header .logo { width:30px; height:30px; border-radius:9px; background:#0b1a36; color:var(--accent); display:grid; place-items:center; font-weight:700; }
+  header h1 { font-size:18px; margin:0; letter-spacing:.08em; }
+  main { flex:1; overflow-y:auto; padding:14px 16px 20px; }
+  nav { display:flex; border-top:1px solid var(--line); padding-bottom:env(safe-area-inset-bottom); background:#071226; }
+  nav button { flex:1; background:none; border:0; color:var(--dim); padding:10px 0 8px; font:inherit; font-size:12px; display:flex; flex-direction:column; align-items:center; gap:2px; }
+  nav button span { font-size:20px; }
+  nav button.active { color:var(--accent); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .muted { color:var(--dim); font-size:14px; }
+  button.primary, button.plain { font:inherit; border-radius:12px; padding:11px 16px; border:1px solid var(--line); }
+  button.primary { background:var(--accent); color:#04121f; border-color:var(--accent); font-weight:600; }
+  button.plain { background:transparent; color:var(--text); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .msg { padding:10px 13px; border-radius:14px; margin:8px 0; max-width:88%; white-space:pre-wrap; word-wrap:break-word; }
+  .msg.me { background:#173a6a; margin-left:auto; }
+  .msg.ai { background:var(--panel); border:1px solid var(--line); }
+  .step { font-size:13px; color:var(--dim); margin:2px 0; }
+  .composer[hidden] { display:none; }
+  .composer { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--line); background:var(--bg); }
+  .composer textarea { flex:1; resize:none; border-radius:12px; border:1px solid var(--line); background:var(--panel); color:var(--text); padding:10px 12px; font:inherit; min-height:44px; max-height:140px; }
+  .task { display:flex; gap:12px; align-items:flex-start; padding:12px 0; border-bottom:1px solid var(--line); }
+  .task input { width:22px; height:22px; margin-top:2px; accent-color:var(--accent); }
+  .flash { min-height:180px; display:grid; place-items:center; text-align:center; font-size:19px; cursor:pointer; }
+  .grades button { flex:1; }
+  .choice { display:flex; gap:10px; width:100%; text-align:left; padding:12px; margin:6px 0; border-radius:12px; border:1px solid var(--line); background:transparent; color:var(--text); font:inherit; }
+  .choice b { color:var(--accent); }
+  .choice.right { border-color:var(--ok); background:rgba(74,222,128,.14); }
+  .choice.wrong { border-color:var(--bad); background:rgba(248,113,113,.14); }
+  .hint { border-left:3px solid var(--warn); padding:6px 10px; color:var(--dim); margin:8px 0; }
+  .ask { border:1px solid var(--warn); }
+  .empty { text-align:center; color:var(--dim); padding:40px 10px; }
+</style>
+</head>
+<body>
+<header><div class="logo">N</div><h1>NEXUS</h1><span class="muted" id="status" style="margin-left:auto"></span></header>
+<main id="main"></main>
+<div class="composer" id="composer" hidden><textarea id="input" rows="1" placeholder="Tell Nexus what to do…" aria-label="Message"></textarea><button class="primary" id="send" aria-label="Send">➤</button></div>
+<nav id="nav">
+  <button data-tab="chat" class="active"><span>💬</span>Chat</button>
+  <button data-tab="today"><span>☀️</span>Today</button>
+  <button data-tab="tasks"><span>✅</span>Tasks</button>
+  <button data-tab="cards"><span>🗂️</span>Cards</button>
+  <button data-tab="quizzes"><span>❓</span>Quizzes</button>
+</nav>
+<script>
+// Everything is built with text nodes, so nothing from the PC or the AI can become markup here.
+const main = document.getElementById('main');
+const h = (tag, props = {}, ...children) => { const el = document.createElement(tag); for (const [key, value] of Object.entries(props)) { if (value == null || value === false) continue; if (key === 'class') el.className = value; else if (key === 'text') el.textContent = value; else if (key.startsWith('on')) el.addEventListener(key.slice(2), value); else el.setAttribute(key, value); } for (const child of children.flat()) if (child != null && child !== false) el.append(child); return el; };
+const api = async (route, body) => { const reply = await fetch(`/api/${route}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}); if (reply.status === 401) { location.reload(); throw new Error('Signed out'); } const data = await reply.json(); if (data.ok === false) throw new Error(data.message || 'That did not work.'); return data; };
+const show = (...nodes) => main.replaceChildren(...nodes);
+const fail = error => show(h('div', { class: 'card' }, h('b', { text: 'NEXUS could not do that' }), h('p', { class: 'muted', text: error.message })));
+let history = [];
+let tab = 'chat';
+
+document.getElementById('nav').addEventListener('click', event => { const button = event.target.closest('button'); if (button) open(button.dataset.tab); });
+function open(name) {
+  tab = name;
+  document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.tab === name));
+  document.getElementById('composer').hidden = name !== 'chat';
+  ({ chat: drawChat, today: drawToday, tasks: drawTasks, cards: drawCards, quizzes: drawQuizzes })[name]().catch(fail);
+}
+
+// Chat: the same agent as on the PC. Steps show as they happen, and risky actions ask here.
+const chatLog = h('div');
+async function drawChat() { if (!chatLog.childNodes.length) chatLog.append(h('div', { class: 'msg ai', text: 'Hi! Ask me anything, or tell me what to do on your PC.' })); show(chatLog); main.scrollTop = main.scrollHeight; }
+async function sendChat() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  history.push({ role: 'user', content: text });
+  chatLog.append(h('div', { class: 'msg me', text }));
+  const reply = h('div', { class: 'msg ai' }, h('span', { class: 'muted', text: 'Thinking…' }));
+  chatLog.append(reply);
+  main.scrollTop = main.scrollHeight;
+  const steps = h('div');
+  const answer = h('div');
+  let streamed = '';
+  try {
+    const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history }) });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    reply.replaceChildren(steps, answer);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n'); buffer = events.pop();
+      for (const raw of events) {
+        if (!raw.startsWith('data: ')) continue;
+        const event = JSON.parse(raw.slice(6));
+        if (event.type === 'tool_start') steps.append(h('div', { class: 'step', id: `s-${event.id}`, text: `… ${event.title || event.name}` }));
+        else if (event.type === 'tool_end') { const row = document.getElementById(`s-${event.id}`) || steps.appendChild(h('div', { class: 'step' })); row.textContent = `${event.ok ? '✓' : '✗'} ${event.summary || event.tool}`; }
+        else if (event.type === 'token') { streamed += event.text; answer.textContent = streamed; }
+        else if (event.type === 'confirm') steps.append(askCard(event));
+        else if (event.type === 'done') { answer.textContent = event.answer; history.push({ role: 'assistant', content: event.answer }); }
+        else if (event.type === 'error') answer.textContent = event.message;
+        main.scrollTop = main.scrollHeight;
+      }
+    }
+  } catch (error) { reply.textContent = `Couldn't reach NEXUS. Is it running on your PC? (${error.message})`; }
+  history = history.slice(-12);
+}
+function askCard(event) {
+  const card = h('div', { class: 'card ask' }, h('b', { text: 'Nexus needs your OK' }), h('p', { text: event.message }));
+  const answer = async ok => { card.replaceChildren(h('span', { class: 'muted', text: ok ? 'Allowed.' : 'Cancelled.' })); await api('confirm', { id: event.id, ok }).catch(() => {}); };
+  card.append(h('div', { class: 'row' }, h('button', { class: 'plain', onclick: () => answer(false), text: 'Cancel' }), h('button', { class: 'primary', onclick: () => answer(true), text: 'Allow' })));
+  return card;
+}
+document.getElementById('send').addEventListener('click', sendChat);
+document.getElementById('input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); } });
+
+// Today: the morning briefing, any time.
+async function drawToday() {
+  show(h('p', { class: 'muted', text: 'Getting your day…' }));
+  const today = await api('today');
+  show(h('div', { class: 'card' }, h('h2', { text: today.greeting, style: 'margin-top:0' }), ...today.lines.map(line => h('p', { text: line }))));
+}
+
+// Tasks: open tasks, ticked off from the phone.
+async function drawTasks() {
+  const { tasks } = await api('tasks');
+  if (!tasks.length) { show(h('div', { class: 'empty', text: 'No open tasks. Ask in Chat to add one.' })); return; }
+  show(h('div', { class: 'card' }, ...tasks.map(task => h('label', { class: 'task' }, h('input', { type: 'checkbox', onchange: async event => { event.target.disabled = true; await api('tasks/done', { id: task.id }); event.target.closest('.task').style.opacity = .4; } }), h('div', {}, h('div', { text: task.title }), task.dueDate ? h('div', { class: 'muted', text: `Due ${new Date(task.dueDate).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` }) : null)))));
+}
+
+// Flashcards due for review, tap to flip, then say how well you knew it.
+async function drawCards() {
+  const { cards } = await api('cards');
+  if (!cards.length) { show(h('div', { class: 'empty', text: 'Nothing to review right now. Nice!' })); return; }
+  let index = 0;
+  const next = () => {
+    const card = cards[index];
+    if (!card) { show(h('div', { class: 'empty', text: `All ${cards.length} reviewed. Great work!` })); return; }
+    let flipped = false;
+    const face = h('div', { class: 'card flash', text: card.question });
+    const grades = h('div', { class: 'row grades', hidden: '' }, ...[['Again', 1], ['Hard', 3], ['Good', 4], ['Easy', 5]].map(([label, grade]) => h('button', { class: grade >= 4 ? 'primary' : 'plain', text: label, onclick: async () => { await api('cards/review', { id: card.id, grade }); index++; next(); } })));
+    face.addEventListener('click', () => { flipped = !flipped; face.textContent = flipped ? card.answer : card.question; grades.hidden = !flipped; });
+    show(h('p', { class: 'muted', text: `Card ${index + 1} of ${cards.length}${card.topic ? ` · ${card.topic}` : ''} · tap to flip` }), face, grades);
+  };
+  next();
+}
+
+// Quizzes made on the PC, taken here: a hint before answering, and the explanation after.
+async function drawQuizzes() {
+  const { quizzes } = await api('quizzes');
+  if (!quizzes.length) { show(h('div', { class: 'empty', text: 'No quizzes yet. Make one in Chat, such as "make me a quiz on 2B".' })); return; }
+  show(...quizzes.map(quiz => h('div', { class: 'card', onclick: () => playQuiz(quiz) }, h('b', { text: quiz.title }), h('div', { class: 'muted', text: `${quiz.questions.length} questions${quiz.last ? ` · last score ${quiz.last}` : ''}` }))));
+}
+function playQuiz(quiz) {
+  const answers = [];
+  let index = 0;
+  const draw = () => {
+    const question = quiz.questions[index];
+    const chosen = answers[index];
+    const hint = h('div');
+    show(
+      h('p', { class: 'muted', text: `${quiz.title} · question ${index + 1} of ${quiz.questions.length}` }),
+      h('div', { class: 'card' }, h('p', { text: question.question, style: 'margin-top:0' }),
+        ...Object.entries(question.choices).map(([letter, text]) => h('button', { class: `choice${chosen ? (letter === question.answer ? ' right' : letter === chosen ? ' wrong' : '') : ''}`, disabled: chosen ? '' : null, onclick: () => { answers[index] = letter; draw(); } }, h('b', { text: letter }), h('span', { text }))),
+        hint,
+        chosen ? h('p', { text: `${chosen === question.answer ? 'Right! ' : `Not quite, it's ${question.answer}. `}${question.explanation || ''}` }) : null),
+      h('div', { class: 'row' },
+        index ? h('button', { class: 'plain', text: '←', onclick: () => { index--; draw(); } }) : null,
+        !chosen && question.hint ? h('button', { class: 'plain', text: 'Hint', onclick: () => hint.replaceChildren(h('div', { class: 'hint', text: question.hint })) }) : null,
+        chosen && index < quiz.questions.length - 1 ? h('button', { class: 'primary', text: 'Next →', onclick: () => { index++; draw(); } }) : null,
+        chosen && index === quiz.questions.length - 1 ? h('button', { class: 'primary', text: 'See results', onclick: finish }) : null));
+  };
+  const finish = async () => {
+    const result = await api('quizzes/finish', { id: quiz.id, answers });
+    show(h('div', { class: 'card' }, h('h2', { text: `${result.score} of ${result.total}`, style: 'margin-top:0' }), ...result.topics.map(item => h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', { text: item.topic }), h('b', { text: `${item.right}/${item.total}` }))), result.carded ? h('p', { class: 'muted', text: `${result.carded} missed question${result.carded === 1 ? '' : 's'} became flashcards.` }) : null), h('button', { class: 'plain', text: 'Back to quizzes', onclick: drawQuizzes }));
+  };
+  draw();
+}
+
+// Shows when NEXUS on the PC can't be reached.
+setInterval(async () => { try { await fetch('/api/ping'); document.getElementById('status').textContent = ''; } catch { document.getElementById('status').textContent = 'PC offline'; } }, 20000);
+open('chat');
+</script>
+</body>
+</html>

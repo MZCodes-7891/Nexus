@@ -21,6 +21,8 @@ function renderGeneralSettings(box) {
         settingRow('Start minimized', '', checkbox(general.startMinimized, value => set({ startMinimized: value }))),
         settingRow('Keep running in the tray when closed', 'Reminders and automations only fire while Nexus is running.', checkbox(general.closeToTray, value => set({ closeToTray: value }))),
         settingRow('Show notifications', 'Windows pop-ups for reminders and automation problems. They are still listed under the bell.', checkbox(general.notifications, value => set({ notifications: value }))),
+        settingRow('Send notifications to my phone', 'Reminders and notes also arrive as a Discord message, once your phone is linked in App Control → Discord bot.', checkbox(general.phoneNotifications, value => set({ phoneNotifications: value }))),
+        settingRow('Morning briefing', 'Each morning, a short rundown of your day: tasks, due work, events, Quran reviews, and tests coming up.', h('div', { class: 'row' }, checkbox(general.morningBriefing, value => set({ morningBriefing: value })), h('input', { type: 'time', value: general.briefingTime, 'aria-label': 'Briefing time', onchange: event => set({ briefingTime: event.target.value }) }))),
         settingRow('Update automatically', 'New versions download from the NEXUS page on GitHub and install the next time NEXUS restarts.', checkbox(general.autoUpdate, value => set({ autoUpdate: value }))),
         updateRow(),
         settingRow('Desktop shortcut', 'Adds a NEXUS shortcut that always runs the current version.', h('button', { type: 'button', class: 'mini-button', text: 'Create shortcut', onclick: async () => { try { toast((await call('system:shortcut')).message, 'ok'); } catch (error) { toast(error.message, 'error'); } } }))
@@ -199,8 +201,35 @@ async function renderAdvancedSettings(box) {
         line('Secure key storage', data.secureStorage, data.secureStorage ? 'Available' : 'Unavailable')
     ));
 }
+// Each section can be public, so it ships to GitHub and friends, or private, so it stays on this PC.
+async function renderSectionSettings(box) {
+    const { sections, editable } = await ipcRenderer.invoke('sections:list');
+    box.replaceChildren(section('Sections',
+        h('p', { class: 'muted small', text: 'Extra pages you can keep to yourself. Private sections stay on this PC: they are never sent to GitHub and are left out of the version your friends download. Public ones go out with the next update.' }),
+        editable ? settingRow('New sections', 'What happens when a new section is added. Until you choose, a new section stays private.', selectBox([['ask', 'Ask me each time'], ['private', 'Always private'], ['public', 'Always public']], appSettings.sections.newAs, value => save({ sections: { newAs: value } }, 'Saved.'))) : null,
+        sections.length ? h('div', {}, sections.map(item => settingRow(item.title, item.description, editable
+            ? selectBox([['private', 'Private, only on my PC'], ['public', 'Public, on GitHub and for friends']], item.public ? 'public' : 'private', async value => { try { toast((await call('sections:set-public', item.id, value === 'public')).message, 'ok'); } catch (error) { toast(error.message, 'error'); } })
+            : h('span', { class: 'muted small', text: item.public ? 'Public' : 'Private' })))) : emptyState('No sections yet.'),
+        editable ? null : h('p', { class: 'muted small', text: 'Switching a section between public and private works in your own copy of NEXUS, the one built from your project folder.' })));
+}
+// Phone: NEXUS in a phone's browser, linked with a QR code that carries a secret key.
+async function renderPhoneSettings(box) {
+    const status = await ipcRenderer.invoke('system:phone-page-status');
+    const redraw = () => renderPhoneSettings(box);
+    const toggle = checkbox(status.on, async value => { try { await call('system:phone-page', { on: value }); } catch (error) { toast(error.message, 'error'); } redraw(); });
+    const awake = checkbox(status.stayAwake, async value => { await call('system:phone-page', { stayAwake: value }); });
+    const codes = status.on ? (status.addresses.length ? status.addresses.map(item => h('div', { class: 'phone-qr' }, h('img', { src: item.qr, alt: `QR code for ${item.kind === 'home' ? 'home Wi-Fi' : 'Tailscale'}` }), h('div', {}, h('b', { text: item.kind === 'home' ? 'On your home Wi-Fi' : 'Anywhere, with Tailscale' }), h('p', { class: 'muted small', text: item.kind === 'home' ? 'Your phone must be on the same Wi-Fi as this PC.' : 'Works away from home, while Tailscale is on on both this PC and your phone.' }), h('code', { class: 'phone-url', text: item.url.replace(/k=.*/, 'k=…') })))) : [h('p', { class: 'error-text small', text: 'This PC is not on a network the phone can reach. Connect to Wi-Fi, or install Tailscale.' })]) : [];
+    box.replaceChildren(section('NEXUS on your phone',
+        h('p', { class: 'muted small', text: 'Open NEXUS in your phone\'s browser: chat with it, see your day, tick off tasks, review flashcards, and take your quizzes. Your PC has to be on with NEXUS running; the screen can be off.' }),
+        settingRow('Phone page', 'Off until you turn it on.', toggle),
+        settingRow('Keep this PC awake', 'Stops the PC from sleeping while the phone page is on, so it can always answer. The screen can still turn off.', awake),
+        ...codes,
+        status.on ? h('ol', { class: 'muted small' }, h('li', { text: 'Scan the code with your phone\'s camera and open the link.' }), h('li', { text: 'Add it to your home screen: on iPhone, Share → Add to Home Screen; on Android, ⋮ → Add to Home screen.' }), h('li', { text: 'The first time, Windows may ask whether NEXUS can use your network. Choose Private networks and Allow.' })) : null,
+        status.on ? settingRow('New key', 'Signs out every phone; scan the new code to sign in again.', h('button', { type: 'button', class: 'mini-button danger', text: 'Make a new key', onclick: async () => { await call('system:phone-page-new-key'); toast('New key made. Old phone links no longer work.', 'ok'); redraw(); } })) : null,
+        h('p', { class: 'muted small', text: 'To use it away from home, install Tailscale (free, tailscale.com) on this PC and your phone and sign in to both with the same account. A second code then appears here.' })));
+}
 function bindSettings() {
-    const PANELS = { general: ['General', renderGeneralSettings], appearance: ['Appearance', renderAppearanceSettings], ai: ['AI', renderAiSettings], voice: ['Voice', renderVoiceSettings], integrations: ['Integrations', renderIntegrationSettings], privacy: ['Privacy', renderPrivacySettings], advanced: ['Advanced', renderAdvancedSettings] };
+    const PANELS = { general: ['General', renderGeneralSettings], appearance: ['Appearance', renderAppearanceSettings], phone: ['Phone', renderPhoneSettings], sections: ['Sections', renderSectionSettings], ai: ['AI', renderAiSettings], voice: ['Voice', renderVoiceSettings], integrations: ['Integrations', renderIntegrationSettings], privacy: ['Privacy', renderPrivacySettings], advanced: ['Advanced', renderAdvancedSettings] };
     let current = 'general';
     const select = tabs('settings-tabs', Object.entries(PANELS).map(([id, [label]]) => [id, label]), id => {
         current = id;

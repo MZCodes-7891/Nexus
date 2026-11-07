@@ -1,5 +1,108 @@
 // Splits a unit's material into its topics, so a test can cover one topic, a few, or the whole unit.
 const MIN_TOPIC = 250;
+
+// Unit packages often label topics with codes, such as "Outcome 2B: ..." under "Objective 2: ...". They also list every
+// outcome together at the start of the unit and of each objective, and end with an answer key in the same order.
+const CODED = /^\s*[-•]?\s*(outcome|objective|topic|section|lesson|chapter|part|learning target|specific outcome)\s+(\d{1,2}(?:\.\d{1,2})?[A-Z]?|[A-Z]\d?)\s*[:.)–-]\s*(.{3,})$/i;
+const PDF_PAGE = /^\[PDF PAGE (\d+)\]\s*$/;
+// Only a heading of its own, such as "ANSWER KEY 1" or "Answers", starts the answer key; "Answer the questions" does not.
+const ANSWERS = /^\s*(answer key[\s\d]*|answers|solutions)\s*$/i;
+
+function outlineSource(name, body) {
+  const lines = String(body || '').split(/\r?\n/);
+  const pageAt = [];
+  let page = 0;
+  const marks = [];
+  let answersFrom = -1;
+  lines.forEach((line, index) => {
+    const pageMatch = line.match(PDF_PAGE);
+    if (pageMatch) page = Number(pageMatch[1]);
+    pageAt[index] = page;
+    const match = line.match(CODED);
+    if (match) {
+      // A heading that wraps onto the next line keeps its second half.
+      let title = match[3].trim();
+      const next = (lines[index + 1] || '').trim();
+      if (next && !CODED.test(next) && !PDF_PAGE.test(next) && /^[a-z(]/.test(next) && next.length < 90) title = `${title} ${next}`;
+      marks.push({ index, kind: match[1].toLowerCase(), code: match[2].toUpperCase(), title: title.replace(/\s+/g, ' ').replace(/\s+([,.])/g, '$1').slice(0, 140) });
+    }
+    if (answersFrom < 0 && marks.length >= 3 && ANSWERS.test(line)) answersFrom = index;
+  });
+  const body_ = answersFrom < 0 ? marks : marks.filter(mark => mark.index < answersFrom);
+  // The topic level is the heading kind with the most different codes, such as outcomes rather than objectives.
+  const kinds = {};
+  for (const mark of body_) (kinds[mark.kind] ||= new Set()).add(mark.code);
+  const [level] = Object.entries(kinds).sort((a, b) => b[1].size - a[1].size)[0] || [];
+  if (!level || kinds[level].size < 3) return [];
+  const parentKind = Object.keys(kinds).find(kind => kind !== level && kinds[kind].size >= 2);
+  // A heading counts as a listing when another heading follows within a few lines, as in a list of the unit's outcomes.
+  const nonEmptyBetween = (from, to) => lines.slice(from + 1, to).filter(line => line.trim() && !PDF_PAGE.test(line)).length;
+  // Close means a little text between, such as the rest of a heading that wrapped onto a line or two.
+  const textBetween = (from, to) => lines.slice(from + 1, to).filter(line => !PDF_PAGE.test(line)).join(' ').replace(/\s+/g, ' ').trim().length;
+  const closeToNext = position => { const next = body_[position + 1]; return Boolean(next) && nonEmptyBetween(body_[position].index, next.index) <= 2 && textBetween(body_[position].index, next.index) < 240; };
+  // The last item of a list is close to the one before it rather than the one after.
+  const isListing = position => position >= 0 && (closeToNext(position) || (position > 0 && closeToNext(position - 1)));
+  const codes = [...kinds[level]];
+  const starts = new Map();
+  body_.forEach((mark, position) => { if (mark.kind === level && !isListing(position) && !starts.has(mark.code)) starts.set(mark.code, mark); });
+  // A code that is only ever listed starts right after the list it is in, when nothing else starts there.
+  for (let position = 0; position < body_.length; position++) {
+    if (!closeToNext(position)) continue;
+    let end = position;
+    while (end + 1 < body_.length && closeToNext(end)) end++;
+    const unheaded = body_.slice(position, end + 1).find(mark => mark.kind === level && !starts.has(mark.code));
+    if (unheaded) starts.set(unheaded.code, { ...unheaded, index: body_[end].index + 1, listed: true });
+    position = end;
+  }
+  const ordered = codes.filter(code => starts.has(code)).map(code => starts.get(code)).sort((a, b) => a.index - b.index);
+  const stopAt = answersFrom < 0 ? lines.length : answersFrom;
+  const titleOf = code => body_.find(mark => mark.kind === level && mark.code === code && !mark.listed)?.title || starts.get(code)?.title || '';
+  const parentOf = code => {
+    if (!parentKind) return '';
+    const parentCode = code.match(/^\d+/)?.[0];
+    const parent = body_.find(mark => mark.kind === parentKind && mark.code === parentCode);
+    return parent ? `${parentKind[0].toUpperCase()}${parentKind.slice(1)} ${parent.code}: ${parent.title}` : '';
+  };
+  // Answers: each code's part of the answer key, up to the next code in it.
+  const answerMarks = answersFrom < 0 ? [] : marks.filter(mark => mark.index > answersFrom && mark.kind === level);
+  const answerFor = code => answerMarks.filter(mark => mark.code === code).map(mark => { const next = answerMarks.find(other => other.index > mark.index); return lines.slice(mark.index + 1, next ? next.index : lines.length).filter(line => !PDF_PAGE.test(line) && !/^\s*answer key\b/i.test(line)).join('\n').trim(); }).join('\n').trim();
+  return ordered.map((start, position) => {
+    const nextStart = Math.min(ordered[position + 1]?.index ?? stopAt, stopAt);
+    // The next objective's introduction and its list of outcomes don't belong to this topic.
+    const boundary = body_.findIndex((mark, index) => mark.index > start.index && mark.index < nextStart && (mark.kind !== level || isListing(index)));
+    const end = boundary >= 0 ? body_[boundary].index : nextStart;
+    const chunk = lines.slice(start.listed ? start.index : start.index, end);
+    const text = chunk.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const firstPage = pageAt[start.index] || 0;
+    // A page marker right before the next topic belongs to that topic, not this one.
+    let last = Math.max(start.index, end - 1);
+    while (last > start.index && (!lines[last].trim() || PDF_PAGE.test(lines[last]))) last--;
+    const lastPage = pageAt[last] || firstPage;
+    return { source: name, code: start.code, title: `${start.code}: ${titleOf(start.code)}`, parent: parentOf(start.code), pages: firstPage ? [firstPage, lastPage] : [], text, answers: answerFor(start.code) };
+  }).filter(topic => topic.text.replace(/\[PDF PAGE \d+\]/g, '').trim().length >= 80);
+}
+
+// Coded topics across all the material's documents, or nothing when the material isn't laid out that way.
+function outlineTopics(material) {
+  const blocks = String(material || '').split(/^SOURCE: /m).filter(Boolean);
+  const topics = [];
+  for (const block of blocks) {
+    const [first, ...rest] = block.split(/\r?\n/);
+    topics.push(...outlineSource(first.trim(), rest.join('\n')));
+  }
+  return topics.map((topic, index) => ({ id: `t${index + 1}`, ...topic }));
+}
+
+// The topic the person means: a code such as "2B" or "outcome 2b", or words from its title such as "niches".
+function pickTopic(topics, request) {
+  const asked = String(request || '');
+  const code = asked.match(/\b(?:outcome|objective|topic|section|lesson|part)?\s*(\d{1,2}(?:\.\d{1,2})?\s*[A-Z])\b/i)?.[1]?.replace(/\s+/g, '').toUpperCase();
+  if (code) { const byCode = topics.filter(topic => topic.code === code); if (byCode.length) return byCode; }
+  const words = (asked.toLowerCase().match(/[a-z]{4,}/g) || []).filter(word => !['topic', 'outcome', 'objective', 'section', 'read', 'about', 'explain', 'summarize', 'summary', 'quiz', 'test', 'from', 'unit', 'with', 'what', 'this', 'that', 'give', 'make', 'questions', 'please', 'notes', 'part'].includes(word));
+  if (!words.length) return [];
+  const scored = topics.map(topic => ({ topic, score: words.reduce((sum, word) => sum + (topic.title.toLowerCase().includes(word) ? 5 : 0) + Math.min(3, topic.text.toLowerCase().split(word).length - 1) * 0.5, 0) })).sort((a, b) => b.score - a.score);
+  return scored[0] && scored[0].score >= 5 ? [scored[0].topic] : [];
+}
 const HEADING_WORDS = /^(?:objective|outcome|topic|section|lesson|part|chapter|unit|module|concept|focus|key idea|learning target)\b\s*[\w.:-]*/i;
 const NUMBERED = /^(?:\d{1,2}(?:\.\d{1,2}){0,2}|[A-H]\d?(?:\.\d{1,2})?)[.):]?\s+[A-Z][^\n]{2,80}$/;
 const PAGE_MARK = /^\[?(?:page|p\.)\s*\d+\]?$/i;
@@ -71,6 +174,9 @@ async function topicsWithAi(material, ask) {
 }
 
 async function findTopics(material, ask) {
+  // Coded outcomes, such as 1A to 4C, are the clearest topics when a unit has them.
+  const coded = outlineTopics(material);
+  if (coded.length >= 3) return { topics: coded, method: 'outline' };
   const byHeadings = splitTopics(material);
   if (byHeadings.length >= 2 || !ask) return { topics: byHeadings, method: 'headings' };
   const byAi = await topicsWithAi(material, ask);
@@ -84,4 +190,4 @@ function materialFor(topics, ids) {
   return { text: chosen.map(topic => `SOURCE: ${topic.source} — ${topic.title}\n${topic.text}`).join('\n\n'), titles: chosen.map(topic => topic.title) };
 }
 
-module.exports = { splitTopics, findTopics, materialFor, looksLikeHeading };
+module.exports = { splitTopics, findTopics, materialFor, looksLikeHeading, outlineTopics, pickTopic };

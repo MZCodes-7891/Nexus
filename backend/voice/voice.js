@@ -66,9 +66,45 @@ function createVoice({ rootDir, getSettings, logger }) {
     child.on('close', () => { if (speaker === child) speaker = null; onDone?.(); });
     child.on('error', error => { logger?.error(`TTS could not start: ${error.message}`); if (speaker === child) speaker = null; onDone?.(); });
   }
+  // Listens until stopped and reports each phrase as text, for following along while someone recites.
+  let follower = null;
+  function follow({ language = 'ar-SA', onText, onState, onLevel, onError }) {
+    stopFollowing();
+    stopSpeaking();
+    const { voice } = getSettings();
+    const args = ['--continuous', '--language', language];
+    if (voice.inputDevice !== '') args.push('--device', voice.inputDevice);
+    const child = spawnPython(rootDir, process.env.NEXUS_VOICE_SCRIPT || 'voice_app_core.py', args);
+    follower = child;
+    child.stdin?.on('error', () => {});
+    let buffer = '';
+    const handleLine = line => {
+      const text = String(line).trim();
+      if (!text) return;
+      if (text.startsWith('TEXT:')) onText?.(text.slice(5));
+      else if (text.startsWith('LEVEL:')) onLevel?.(Math.min(1, Math.max(0, Number(text.slice(6)) || 0)));
+      else if (text.startsWith('STATE:')) onState?.(text.slice(6));
+      else if (text.startsWith('ERROR:')) onError?.(text.slice(6).trim());
+    };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', data => { buffer += data; const lines = buffer.split(/\r?\n/); buffer = lines.pop() || ''; lines.forEach(handleLine); });
+    child.stderr.on('data', data => logger?.debug(`follow stderr: ${data}`));
+    child.on('error', error => { if (follower === child) follower = null; onError?.(`Could not start listening (${error.message}).`); });
+    child.on('close', () => { if (follower === child) { follower = null; onState?.('stopped'); } });
+    return { ok: true };
+  }
+  // Asks it to finish the phrases it already heard, then makes sure it is gone.
+  function stopFollowing() {
+    const child = follower;
+    if (!child) return { ok: true };
+    follower = null;
+    try { child.stdin?.write('stop\n'); } catch {}
+    setTimeout(() => stopTree(child), 6000);
+    return { ok: true };
+  }
   const listVoices = () => runPythonJson(rootDir, 'tts_core.py', ['--list-voices'], { timeout: 20000 });
   const listDevices = () => runPythonJson(rootDir, 'voice_app_core.py', ['--list-devices'], { timeout: 20000 });
-  return { listen, finishListening, stopListening, speak, stopSpeaking, listVoices, listDevices, stopAll() { stopListening(); stopSpeaking(); } };
+  return { listen, finishListening, stopListening, speak, stopSpeaking, follow, stopFollowing, listVoices, listDevices, stopAll() { stopListening(); stopSpeaking(); stopFollowing(); } };
 }
 
 module.exports = { createVoice };
