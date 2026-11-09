@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#050b18">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="NEXUS">
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" href="/icon.svg">
 <link rel="apple-touch-icon" href="/icon.svg">
 <title>NEXUS</title>
@@ -35,6 +35,9 @@
   .step { font-size:13px; color:var(--dim); margin:2px 0; }
   .composer[hidden] { display:none; }
   .composer { display:flex; gap:8px; padding:10px 16px; border-top:1px solid var(--line); background:var(--bg); }
+  .camera.listening { border-color:var(--bad);background:rgba(248,113,113,.18); }
+  .camera { display:grid;place-items:center;width:44px;border-radius:12px;border:1px solid var(--line);font-size:20px;cursor:pointer; }
+  .shot { max-width:60%;border-radius:12px;display:block;margin-left:auto; }
   .composer textarea { flex:1; resize:none; border-radius:12px; border:1px solid var(--line); background:var(--panel); color:var(--text); padding:10px 12px; font:inherit; min-height:44px; max-height:140px; }
   .task { display:flex; gap:12px; align-items:flex-start; padding:12px 0; border-bottom:1px solid var(--line); }
   .task input { width:22px; height:22px; margin-top:2px; accent-color:var(--accent); }
@@ -47,12 +50,19 @@
   .hint { border-left:3px solid var(--warn); padding:6px 10px; color:var(--dim); margin:8px 0; }
   .ask { border:1px solid var(--warn); }
   .empty { text-align:center; color:var(--dim); padding:40px 10px; }
+.now-item { padding:8px 0;border-top:1px solid rgba(125,180,255,.15); }
+.now-item.first b { color:#5fb4ff; }
+.day-row { display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid rgba(125,180,255,.12); }
+.day-row.fixed { opacity:.6; }
+.day-row.now { color:#5fb4ff;font-weight:600; }
+.day-row.done > div { text-decoration:line-through;opacity:.6; }
+.day-time { width:72px;flex:none;opacity:.75;font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
 <header><div class="logo">N</div><h1>NEXUS</h1><span class="muted" id="status" style="margin-left:auto"></span></header>
 <main id="main"></main>
-<div class="composer" id="composer" hidden><textarea id="input" rows="1" placeholder="Tell Nexus what to do…" aria-label="Message"></textarea><button class="primary" id="send" aria-label="Send">➤</button></div>
+<div class="composer" id="composer" hidden><label class="plain camera" aria-label="Take a photo of homework" title="Photo homework help">📷<input type="file" id="photo" accept="image/*" capture="environment" hidden></label><textarea id="input" rows="1" placeholder="Tell Nexus what to do…" aria-label="Message"></textarea><button class="plain camera" id="mic" aria-label="Talk to Nexus" title="Talk" hidden>🎤</button><button class="primary" id="send" aria-label="Send">➤</button></div>
 <nav id="nav">
   <button data-tab="chat" class="active"><span>💬</span>Chat</button>
   <button data-tab="today"><span>☀️</span>Today</button>
@@ -81,13 +91,32 @@ function open(name) {
 // Chat: the same agent as on the PC. Steps show as they happen, and risky actions ask here.
 const chatLog = h('div');
 async function drawChat() { if (!chatLog.childNodes.length) chatLog.append(h('div', { class: 'msg ai', text: 'Hi! Ask me anything, or tell me what to do on your PC.' })); show(chatLog); main.scrollTop = main.scrollHeight; }
+// A photo is shrunk on the phone first, so it sends quickly; it is only kept with the message it was taken for.
+let photo = null;
+document.getElementById('photo').addEventListener('change', async event => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  const image = await createImageBitmap(file).catch(() => null);
+  if (!image) { alert('That photo could not be opened.'); return; }
+  const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(image.width * scale); canvas.height = Math.round(image.height * scale);
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  photo = canvas.toDataURL('image/jpeg', 0.85);
+  const input = document.getElementById('input');
+  if (!input.value.trim()) input.value = 'Help me with this homework question. Explain how to solve it step by step, using my notes if they cover it.';
+  input.focus();
+});
 async function sendChat() {
   const input = document.getElementById('input');
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  history.push({ role: 'user', content: text });
+  const shot = photo; photo = null;
+  history.push({ role: 'user', content: text, ...(shot ? { imageData: [shot.split(',')[1]] } : {}) });
   chatLog.append(h('div', { class: 'msg me', text }));
+  if (shot) chatLog.append(h('img', { class: 'shot', src: shot, alt: 'Your photo' }));
   const reply = h('div', { class: 'msg ai' }, h('span', { class: 'muted', text: 'Thinking…' }));
   chatLog.append(reply);
   main.scrollTop = main.scrollHeight;
@@ -112,13 +141,14 @@ async function sendChat() {
         else if (event.type === 'tool_end') { const row = document.getElementById(`s-${event.id}`) || steps.appendChild(h('div', { class: 'step' })); row.textContent = `${event.ok ? '✓' : '✗'} ${event.summary || event.tool}`; }
         else if (event.type === 'token') { streamed += event.text; answer.textContent = streamed; }
         else if (event.type === 'confirm') steps.append(askCard(event));
-        else if (event.type === 'done') { answer.textContent = event.answer; history.push({ role: 'assistant', content: event.answer }); }
+        else if (event.type === 'done') { answer.textContent = event.answer; history.push({ role: 'assistant', content: event.answer }); speak(event.answer); }
         else if (event.type === 'error') answer.textContent = event.message;
         main.scrollTop = main.scrollHeight;
       }
     }
-  } catch (error) { reply.textContent = `Couldn't reach NEXUS. Is it running on your PC? (${error.message})`; }
-  history = history.slice(-12);
+  } catch (error) { reply.textContent = `Couldn't reach NEXUS on your PC. Check that Tailscale is connected on this phone and NEXUS is open on the PC, then try again.`; }
+  // Photos are sent once; later messages carry only the words, and what Nexus saw is in its answer.
+  history = history.slice(-12).map(({ imageData, ...rest }) => rest);
 }
 function askCard(event) {
   const card = h('div', { class: 'card ask' }, h('b', { text: 'Nexus needs your OK' }), h('p', { text: event.message }));
@@ -129,11 +159,111 @@ function askCard(event) {
 document.getElementById('send').addEventListener('click', sendChat);
 document.getElementById('input').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); } });
 
-// Today: the morning briefing, any time.
+// Today: the morning briefing, any time, and the phone's own settings for notifications and spoken answers.
 async function drawToday() {
   show(h('p', { class: 'muted', text: 'Getting your day…' }));
   const today = await api('today');
-  show(h('div', { class: 'card' }, h('h2', { text: today.greeting, style: 'margin-top:0' }), ...today.lines.map(line => h('p', { text: line }))));
+  const speakBox = h('input', { type: 'checkbox', onchange: event => { try { localStorage.setItem('nexus.speak', event.target.checked ? '1' : ''); } catch {} } });
+  speakBox.checked = speaking();
+  const notes = h('div', { class: 'row' });
+  if (!window.isSecureContext || !('serviceWorker' in navigator) || !('PushManager' in window)) notes.append(h('span', { class: 'muted', text: 'Notifications and voice need the secure link. Turn it on in NEXUS → Settings → Phone on your PC, then open the secure QR code.' }));
+  else if (Notification.permission === 'granted') notes.append(h('span', { class: 'muted', text: '🔔 Notifications are on for this phone.' }));
+  else notes.append(h('button', { class: 'primary', text: '🔔 Turn on notifications', onclick: () => turnOnPush().then(drawToday).catch(error => alert(error.message)) }));
+  const [now, quick, day] = await Promise.all([api('now').catch(() => ({ items: [] })), api('quick/settings').catch(() => null), api('day').catch(() => null)]);
+  show(day?.plan ? dayCard(day.plan) : null,
+    now.items.length ? h('div', { class: 'card' }, h('b', { text: 'What to do right now' }), ...now.items.slice(0, 5).map((item, index) => h('div', { class: `now-item${index === 0 ? ' first' : ''}` }, h('b', { text: item.title }), h('div', { class: 'muted', text: item.detail })))) : null,
+    h('div', { class: 'card' }, h('h2', { text: today.greeting, style: 'margin-top:0' }), ...today.lines.map(line => h('p', { text: line }))),
+    quick ? quickSettingsCard(quick) : null,
+    h('div', { class: 'card' }, h('b', { text: 'This phone' }), h('label', { class: 'row', style: 'margin:10px 0' }, speakBox, h('span', { text: 'Read answers out loud' })), notes));
+}
+
+// My day: the timed plan from the PC. Work blocks can be ticked off here.
+function dayCard(plan) {
+  const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const fixed = ['school', 'routine', 'event', 'prayer', 'break'];
+  const nowTime = Date.now();
+  const blocks = plan.blocks.filter(block => new Date(block.end).getTime() > nowTime - 30 * 60000 || block.status !== 'planned');
+  const work = plan.blocks.filter(block => !fixed.includes(block.kind));
+  return h('div', { class: 'card' }, h('b', { text: `My day · ${work.filter(block => block.status === 'done').length} of ${work.length} done` }),
+    ...blocks.map(block => {
+      const current = new Date(block.start).getTime() <= nowTime && new Date(block.end).getTime() > nowTime;
+      return h('div', { class: `day-row${current ? ' now' : ''}${block.status === 'done' ? ' done' : ''}${fixed.includes(block.kind) ? ' fixed' : ''}` },
+        h('span', { class: 'day-time', text: time(block.start) }),
+        h('div', { style: 'flex:1' }, h('div', { text: block.title }), block.detail && !fixed.includes(block.kind) ? h('div', { class: 'muted', text: block.detail }) : null),
+        !fixed.includes(block.kind) && block.status === 'planned' ? h('button', { class: 'plain', text: '✓', onclick: () => api('day/mark', { id: block.id, status: 'done' }).then(drawToday).catch(error => alert(error.message)) }) : null);
+    }),
+    h('div', { class: 'row' }, h('button', { class: 'plain', text: '↻ Re-plan', onclick: () => api('day/plan', {}).then(drawToday).catch(error => alert(error.message)) }), h('button', { class: 'plain', text: '+ Add', onclick: () => { const title = prompt('What do you need to do today?'); if (title) api('day/add', { title, minutes: 30 }).then(drawToday).catch(error => alert(error.message)); } })));
+}
+
+// Quick questions: a few a day as notifications, between the times chosen here. Tapping one opens it.
+function quickSettingsCard(quick) {
+  const on = h('input', { type: 'checkbox' }); on.checked = quick.on;
+  const perDay = h('select', {}, ...[1, 2, 3, 4, 5, 6].map(count => h('option', { value: count, text: `${count} a day` })));
+  perDay.value = String(quick.perDay);
+  const from = h('input', { type: 'time', value: quick.from }); const to = h('input', { type: 'time', value: quick.to });
+  const status = h('p', { class: 'muted', text: quick.today.answered ? `Today: ${quick.today.right} of ${quick.today.answered} right.` : 'Questions come from your mistakes and weak topics first.' });
+  const save = () => api('quick/settings', { on: on.checked, perDay: Number(perDay.value), from: from.value, to: to.value }).then(() => { status.textContent = on.checked ? `On: ${perDay.value} a day between ${from.value} and ${to.value}.` : 'Off.'; }).catch(error => { status.textContent = error.message; });
+  [on, perDay, from, to].forEach(control => control.addEventListener('change', save));
+  return h('div', { class: 'card' }, h('b', { text: '📚 Quick questions' }),
+    h('label', { class: 'row', style: 'margin:10px 0' }, on, h('span', { text: 'Send me quiz questions as notifications' })),
+    h('div', { class: 'row' }, perDay, h('span', { class: 'muted', text: 'from' }), from, h('span', { class: 'muted', text: 'to' }), to),
+    status,
+    h('div', { class: 'row' }, h('button', { class: 'primary', text: 'Try one now', onclick: () => playQuick('') }), h('button', { class: 'plain', text: 'Send one to test', onclick: () => api('quick/send-now', {}).then(() => { status.textContent = 'Sent. It should show up as a notification in a few seconds.'; }).catch(error => { status.textContent = error.message; }) })));
+}
+async function playQuick(id) {
+  show(h('p', { class: 'muted', text: 'Getting your question…' }));
+  const { question } = await api('quick/get', { id });
+  const hint = h('div');
+  const result = h('div');
+  const buttons = Object.entries(question.choices).map(([letter, text]) => h('button', { class: 'choice', onclick: async () => {
+    buttons.forEach(button => { button.disabled = true; });
+    const reply = await api('quick/answer', { id: question.id, letter });
+    buttons.forEach(button => { const mine = button.dataset.letter; if (mine === reply.answer) button.classList.add('right'); else if (mine === letter) button.classList.add('wrong'); });
+    result.replaceChildren(h('p', { text: `${reply.right ? 'Right! ' : `Not quite, it's ${reply.answer}. `}${reply.explanation}` }));
+    speak(reply.right ? 'Right!' : `Not quite. It's ${reply.answer}, ${reply.choice}.`);
+  }, 'data-letter': letter }, h('b', { text: letter }), h('span', { text })));
+  show(h('p', { class: 'muted', text: `Quick question${question.topic ? ` · ${question.topic}` : ''}` }),
+    h('div', { class: 'card' }, h('p', { text: question.question, style: 'margin-top:0' }), ...buttons, hint, result),
+    h('div', { class: 'row' },
+      question.hint ? h('button', { class: 'plain', text: 'Hint', onclick: () => hint.replaceChildren(h('div', { class: 'hint', text: question.hint })) }) : null,
+      h('button', { class: 'primary', text: 'Another one', onclick: () => playQuick('').catch(fail) }),
+      h('button', { class: 'plain', text: 'Done', onclick: () => open('today') })));
+}
+
+// Push: the phone subscribes with NEXUS's key, and NEXUS sends reminders and updates through the phone's push service.
+async function turnOnPush() {
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Notifications were not allowed. You can allow them in your phone settings.');
+  const registration = await navigator.serviceWorker.ready;
+  const { key } = await api('push/key');
+  const raw = atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - key.length % 4) % 4));
+  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0)) });
+  await api('push/subscribe', { subscription: subscription.toJSON() });
+}
+if (window.isSecureContext && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+// Voice: the phone's own speech recognition turns speech into the message, and answers can be read aloud.
+const speaking = () => { try { return localStorage.getItem('nexus.speak') === '1'; } catch { return false; } };
+function speak(text) { if (!speaking() || !('speechSynthesis' in window)) return; speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(String(text).replace(/[*#_`>]/g, '').slice(0, 1500))); }
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (Recognition && window.isSecureContext) {
+  const mic = document.getElementById('mic');
+  mic.hidden = false;
+  let listening = null;
+  mic.addEventListener('click', () => {
+    if (listening) { listening.stop(); return; }
+    const recognition = new Recognition();
+    recognition.lang = navigator.language || 'en-US';
+    recognition.interimResults = true;
+    const input = document.getElementById('input');
+    recognition.onresult = event => { input.value = [...event.results].map(result => result[0].transcript).join(' '); };
+    recognition.onend = () => { listening = null; mic.classList.remove('listening'); if (input.value.trim()) sendChat(); };
+    recognition.onerror = event => { if (event.error === 'not-allowed') alert('Allow the microphone for this page in your phone settings.'); };
+    listening = recognition;
+    mic.classList.add('listening');
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    recognition.start();
+  });
 }
 
 // Tasks: open tasks, ticked off from the phone.
@@ -194,7 +324,10 @@ function playQuiz(quiz) {
 
 // Shows when NEXUS on the PC can't be reached.
 setInterval(async () => { try { await fetch('/api/ping'); document.getElementById('status').textContent = ''; } catch { document.getElementById('status').textContent = 'PC offline'; } }, 20000);
-open('chat');
+// A tapped quick-question notification opens with ?quick=<id>.
+const quickId = new URLSearchParams(location.search).get('quick');
+if (quickId) { tab = 'today'; document.querySelectorAll('nav button').forEach(button => button.classList.toggle('active', button.dataset.tab === 'today')); document.getElementById('composer').hidden = true; playQuick(quickId).catch(fail); window.history.replaceState(null, '', location.pathname + (new URLSearchParams(location.search).get('k') ? `?k=${new URLSearchParams(location.search).get('k')}` : '')); }
+else open('chat');
 </script>
 </body>
 </html>

@@ -1145,7 +1145,7 @@ test('pictures are made and saved, and looked at by the vision model', async () 
   await assert.rejects(images.generate({ prompt: '  ' }), /Say what/);
   const seen = await images.describe({ images: [await images.readImage(made.path)], question: 'What is it?' });
   assert.deepStrictEqual(seen, ['A red apple on a table.']);
-  assert.strictEqual(asked[0].model, 'qwen2.5vl:3b');
+  assert.strictEqual(asked[0].model, 'gemma3:12b');
   assert.ok(asked[0].messages[1].images[0].length > 0);
   await assert.rejects(images.readImage(path.join(outDir, 'notes.txt')), /isn't a picture/);
   const busy = createImages({ models, outDir, fetchFn: async () => ({ ok: false, status: 429, headers: { get: () => 'application/json' } }) });
@@ -1369,4 +1369,30 @@ test('a unit laid out by outcomes is read by outcome, with its pages and answers
   assert.match(context, /TOPIC 1B: Identify examples of niches \(pages 3 to 3\)/);
   assert.doesNotMatch(context, /Mitosis is explained/);
   assert.match(extractRequestedDocumentContext('read outcome 5D', `FILE: Unit\n${doc}`), /no 5D among them/);
+});
+
+test('a tool failing the same way twice is not tried again, and the empty-reply retry works', async () => {
+  const registry = new ToolRegistry();
+  let ran = 0;
+  registry.register({ name: 'make_channel', keywords: ['channel'], description: 'Make a channel', risk: 'read', parameters: { type: 'object', properties: { name: { type: 'string' } } }, handler: async () => { ran++; return { ok: false, error: 'The bot is not allowed.' }; } });
+  const calls = n => ({ toolCalls: [{ name: 'make_channel', args: { name: `c${n}` } }] });
+  const models = scriptedModels([calls(1), calls(2), calls(3), calls(4), { content: '' }, { content: 'The bot is not allowed to make channels.' }]);
+  const result = await runAgent(agentArgs(models, registry, undefined, { messages: [{ role: 'user', content: 'make a channel' }] }));
+  assert.strictEqual(ran, 2);
+  assert.match(result.answer, /not allowed/);
+});
+test('a guessed Windows user folder is read as the real one', () => {
+  const home = tempDir();
+  fs.mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+  const guard = createFileGuard({ getSettings: () => settingsWith(), dataDir: path.join(home, 'data'), home, env: {} });
+  if (process.platform === 'win32') assert.strictEqual(guard.resolve('C:/Users/SomeoneWhoIsNotHere/Downloads/a.pdf'), path.join(home, 'Downloads', 'a.pdf'));
+});
+test('reminders take one or several, under any name the model uses', async () => {
+  const { buildTools } = require('../backend/tools/index');
+  const src = fs.readFileSync(path.join(__dirname, '../backend/tools/index.js'), 'utf8');
+  const reminderList = new Function(src.match(/function reminderList[\s\S]*?\n}\n/)[0] + 'return reminderList;')();
+  assert.deepStrictEqual(reminderList({ text: 'Study', when: 'in 1 hour' }), [{ text: 'Study', when: 'in 1 hour' }]);
+  assert.strictEqual(reminderList({ steps: [{ title: 'A', when: 'in 2 hours' }, { title: 'B', when: 'tomorrow at 9 AM' }] }).length, 2);
+  assert.strictEqual(reminderList({}).length, 0);
+  assert.ok(buildTools);
 });

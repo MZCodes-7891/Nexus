@@ -219,6 +219,8 @@ async function renderPhoneSettings(box) {
     const toggle = checkbox(status.on, async value => { try { await call('system:phone-page', { on: value }); } catch (error) { toast(error.message, 'error'); } redraw(); });
     const awake = checkbox(status.stayAwake, async value => { await call('system:phone-page', { stayAwake: value }); });
     const codes = status.on ? (status.addresses.length ? status.addresses.map(item => h('div', { class: 'phone-qr' }, h('img', { src: item.qr, alt: `QR code for ${item.kind === 'home' ? 'home Wi-Fi' : 'Tailscale'}` }), h('div', {}, h('b', { text: item.kind === 'home' ? 'On your home Wi-Fi' : 'Anywhere, with Tailscale' }), h('p', { class: 'muted small', text: item.kind === 'home' ? 'Your phone must be on the same Wi-Fi as this PC.' : 'Works away from home, while Tailscale is on on both this PC and your phone.' }), h('code', { class: 'phone-url', text: item.url.replace(/k=.*/, 'k=…') })))) : [h('p', { class: 'error-text small', text: 'This PC is not on a network the phone can reach. Connect to Wi-Fi, or install Tailscale.' })]) : [];
+    const secureBox = h('div');
+    const drawSecure = () => drawSecureLink(secureBox, status.on ? (status.addresses[0]?.url.split('k=')[1] || '') : '').catch(() => {});
     box.replaceChildren(section('NEXUS on your phone',
         h('p', { class: 'muted small', text: 'Open NEXUS in your phone\'s browser: chat with it, see your day, tick off tasks, review flashcards, and take your quizzes. Your PC has to be on with NEXUS running; the screen can be off.' }),
         settingRow('Phone page', 'Off until you turn it on.', toggle),
@@ -226,7 +228,22 @@ async function renderPhoneSettings(box) {
         ...codes,
         status.on ? h('ol', { class: 'muted small' }, h('li', { text: 'Scan the code with your phone\'s camera and open the link.' }), h('li', { text: 'Add it to your home screen: on iPhone, Share → Add to Home Screen; on Android, ⋮ → Add to Home screen.' }), h('li', { text: 'The first time, Windows may ask whether NEXUS can use your network. Choose Private networks and Allow.' })) : null,
         status.on ? settingRow('New key', 'Signs out every phone; scan the new code to sign in again.', h('button', { type: 'button', class: 'mini-button danger', text: 'Make a new key', onclick: async () => { await call('system:phone-page-new-key'); toast('New key made. Old phone links no longer work.', 'ok'); redraw(); } })) : null,
-        h('p', { class: 'muted small', text: 'To use it away from home, install Tailscale (free, tailscale.com) on this PC and your phone and sign in to both with the same account. A second code then appears here.' })));
+        h('p', { class: 'muted small', text: 'To use it away from home, install Tailscale (free, tailscale.com) on this PC and your phone and sign in to both with the same account. A second code then appears here.' })),
+        secureBox);
+    drawSecure();
+}
+// The secure (https) link through Tailscale, which phones need for the microphone and notifications.
+async function drawSecureLink(box, keyUrl) {
+    const status = await ipcRenderer.invoke('system:secure-link-status');
+    if (!status.available) { box.replaceChildren(); return; }
+    const toggle = h('button', { type: 'button', class: status.served ? 'mini-button' : 'action-btn-primary', text: status.served ? 'Turn off the secure link' : 'Turn on the secure link' });
+    toggle.addEventListener('click', busyButton(toggle, 'Working…', async () => { await call('system:secure-link', { on: !status.served }); drawSecureLink(box, keyUrl); }));
+    const qr = status.served && keyUrl ? h('div', { class: 'phone-qr' }, h('img', { src: await ipcRenderer.invoke('system:qr', `${status.url}?k=${keyUrl}`), alt: 'QR code for the secure link' }), h('div', {}, h('b', { text: 'Secure link, anywhere with Tailscale' }), h('p', { class: 'muted small', text: 'Use this one for voice and notifications on your phone. Scan it, then add it to your home screen again.' }), h('code', { class: 'phone-url', text: status.url }))) : null;
+    box.replaceChildren(section('Voice and notifications on your phone',
+        h('p', { class: 'muted small', text: 'Phones only allow the microphone and lock-screen notifications on a secure (https) link. Tailscale can make one for NEXUS, free, at your PC\'s private Tailscale name.' }),
+        settingRow('1. Turn on HTTPS in Tailscale', status.httpsOn ? 'Done.' : 'Open Tailscale\'s DNS page, scroll to HTTPS Certificates, and press Enable HTTPS. Then come back here.', status.httpsOn ? h('span', { class: 'diag-ok', text: 'On' }) : h('button', { type: 'button', class: 'mini-button', text: 'Open Tailscale DNS settings', onclick: () => ipcRenderer.invoke('open-external-url', 'https://login.tailscale.com/admin/dns') })),
+        settingRow('2. Secure link for NEXUS', status.served ? `On at ${status.url}` : 'Makes NEXUS reachable at a private https address only your Tailscale devices can open.', status.httpsOn ? toggle : h('span', { class: 'muted small', text: 'Do step 1 first.' })),
+        qr));
 }
 function bindSettings() {
     const PANELS = { general: ['General', renderGeneralSettings], appearance: ['Appearance', renderAppearanceSettings], phone: ['Phone', renderPhoneSettings], sections: ['Sections', renderSectionSettings], ai: ['AI', renderAiSettings], voice: ['Voice', renderVoiceSettings], integrations: ['Integrations', renderIntegrationSettings], privacy: ['Privacy', renderPrivacySettings], advanced: ['Advanced', renderAdvancedSettings] };

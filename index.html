@@ -111,8 +111,11 @@
             <!-- STUDY CENTER -->
             <div id="view-school" class="view hidden"><div class="page">
                 <div class="page-head"><div><h2>Study Center</h2><p>Your courses, materials, and a tutor that works only from what you give it.</p></div></div>
-                <div id="study-tabs" class="tabs" role="tablist"></div>
+                <div id="study-groups" class="study-groups" role="tablist" aria-label="Study Center sections"></div>
+                <div id="study-tabs" class="tabs study-subtabs" role="tablist"></div>
+                <div id="study-tab-coach" class="tab-panel hidden"></div>
                 <div id="study-tab-quizzes" class="tab-panel hidden"></div>
+                <div id="study-tab-mistakes" class="tab-panel hidden"></div>
                 <div id="study-tab-sets" class="tab-panel hidden"></div>
                 <div id="study-tab-d2l" class="tab-panel hidden"></div>
                 <div id="study-tab-assignments" class="tab-panel hidden"></div>
@@ -282,7 +285,10 @@
     <script src="frontend/js/studysets.js"></script>
     <script src="frontend/js/writing.js"></script>
     <script src="frontend/js/quizzes.js"></script>
+    <script src="frontend/js/mistakes.js"></script>
     <script src="frontend/js/hub.js"></script>
+    <script src="frontend/js/coach.js"></script>
+    <script src="frontend/js/myday.js"></script>
     <script src="frontend/js/research.js"></script>
     <script src="frontend/js/calendar.js"></script>
     <script src="frontend/js/automations.js"></script>

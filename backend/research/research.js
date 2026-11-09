@@ -46,6 +46,22 @@ function parseDuckDuckGo(html) {
   return results;
 }
 
+// Adds [n] to each sentence of real length, naming the source that shares the most of its words, when that is clear.
+function citeBySimilarity(report, sources) {
+  const wordsOf = text => new Set(String(text).toLowerCase().match(/[a-z]{4,}/g) || []);
+  const sourceWords = sources.map(source => ({ id: source.id, words: wordsOf(source.text) }));
+  return String(report).split('\n').map(line => {
+    if (/^\s*(#|$)/.test(line)) return line;
+    return line.replace(/([^.!?]{40,}?[.!?])(\s|$)/g, (sentence, body, space) => {
+      const words = [...wordsOf(body)];
+      if (words.length < 5) return sentence;
+      let best = null;
+      for (const source of sourceWords) { const score = words.filter(word => source.words.has(word)).length / words.length; if (!best || score > best.score) best = { id: source.id, score }; }
+      return best && best.score >= 0.5 ? `${body.replace(/[.!?]$/, '')} [${best.id}]${body.slice(-1)}${space}` : sentence;
+    });
+  }).join('\n');
+}
+
 function createResearch({ dataDir, models, fetchImpl = (...args) => fetch(...args) }) {
   const projects = new CollectionStore(path.join(dataDir, 'research-projects.json'));
 
@@ -125,6 +141,8 @@ function createResearch({ dataDir, models, fetchImpl = (...args) => fetch(...arg
       ], contextLength: 16384, signal });
       if (cited(retry.content)) report = retry.content.trim();
     }
+    // Last resort: each sentence is matched to the source it shares the most words with, and that source's number is added.
+    if (!cited(report)) report = citeBySimilarity(report, sources);
     const note = [found.note, cited(report) ? '' : 'The model did not mark which source supports each claim, so check the facts against the sources.'].filter(Boolean).join(' ');
     const project = { id: crypto.randomUUID(), question: topic, report, engine: found.engine, note, sources: sources.map(({ id, title, url }) => ({ id, title, url })), failures, createdAt: new Date().toISOString() };
     await projects.upsert(project);
@@ -133,4 +151,4 @@ function createResearch({ dataDir, models, fetchImpl = (...args) => fetch(...arg
   return { search, readPage, run, listProjects: () => projects.list(), getProject: id => projects.get(id), removeProject: id => projects.remove(id) };
 }
 
-module.exports = { createResearch, parseDuckDuckGo, htmlToText, assertPublicUrl, isPrivateAddress };
+module.exports = { createResearch, parseDuckDuckGo, htmlToText, assertPublicUrl, isPrivateAddress, citeBySimilarity };

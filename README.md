@@ -32,7 +32,7 @@ No terminal, Python, or other setup is needed. Windows may warn that the install
 - **Smart home:** control lights, plugs, and more through your own [Home Assistant](https://www.home-assistant.io).
 - **Languages:** main labels in French, Spanish, German, Arabic, Urdu, Hindi, and Chinese.
 - **Voice:** hold the button and talk, or turn on a wake phrase for hands-free use. Choose any Windows voice, with pitch, speed, and volume.
-- **Pictures:** ask for a picture and Nexus makes one, or attach a picture and ask about it. Looking at pictures uses a local vision model (`ollama pull qwen2.5vl:3b`).
+- **Pictures:** ask for a picture and Nexus makes one, or attach a picture and ask about it. Looking at pictures uses a local vision model (`ollama pull gemma3:12b`).
 - **Practice tests by topic:** pick the topics in a unit document, or the whole unit. Tests can follow the Alberta Science 9 curriculum outcomes.
 - **Write like me:** give Nexus samples of your writing, and it writes or polishes in your voice, in a tone you pick: My usual, Serious, Chill, School, or Formal.
 - **Phone control:** link your Discord account and message your Nexus bot from your phone. It answers, sends pictures, and can quiz you in the chat.

@@ -35,7 +35,7 @@ async function showSetup({ force = false } = {}) {
         const engineOk = current.serverRunning && !current.engineProblem;
         stepsBox.replaceChildren(
             step(engineOk, 'AI engine', engineOk ? 'Ollama is installed and running.' : current.engineProblem ? 'Ollama is damaged and needs reinstalling.' : 'Ollama runs AI privately on this computer. About a 1.6 GB download.'),
-            step(current.ready, 'AI model', current.ready ? `${current.model} is ready.` : current.modelInstalled && !current.engineProblem ? current.message : `${current.recommendedModel}, about a 4.7 GB download.`)
+            step(current.ready, 'AI model', current.ready ? `${current.model} is ready.` : current.modelInstalled && !current.engineProblem ? current.message : `${current.recommendedModel}, ${current.recommendedSize || 'a few GB to download'}. It was picked to fit your graphics card.`)
         );
         const buttons = [];
         if (busy) buttons.push(h('button', { type: 'button', class: 'integration-button secondary', text: 'Cancel', onclick: () => call('setup:cancel') }));

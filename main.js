@@ -117,6 +117,7 @@ async function notify({ title, body, kind = 'info', id = '' }) {
   }
   send('notifications:new', entry);
   // Reminders and notes also go to the phone, when an account is linked and this is on.
+  if (getSettings().general.phoneNotifications && !process.env.NEXUS_TEST) pushToPhones(entry.title, entry.body).catch(() => {});
   if (getSettings().general.phoneNotifications && !process.env.NEXUS_TEST) phone?.tell(`🔔 ${entry.title}${entry.body ? `
 ${entry.body}` : ''}`).catch(() => {});
   return entry;
@@ -124,6 +125,8 @@ ${entry.body}` : ''}`).catch(() => {});
 const calendar = createCalendar({ dataDir, notify });
 const updater = createUpdater({ app, getSettings, notify, send, logger, ownerBuild });
 const study = createStudy({ dataDir, models });
+const { createCoach, codesIn } = require('./backend/study/coach');
+const coach = createCoach({ dataDir, models, study });
 const writingStyle = createWritingStyle({ dataDir, models });
 const research = createResearch({ dataDir, models });
 const voice = createVoice({ rootDir, getSettings, logger });
@@ -178,7 +181,7 @@ const smartHome = createSmartHome({ dataDir, safeStorage, getUrl: () => getSetti
 // These are created further down, once the app's handlers exist, and are only used when a tool actually runs.
 const lateHub = { run: (...args) => hub.run(...args) };
 const lateSuggestions = { check: () => suggestionInbox.check(), status: () => suggestionInbox.status(), addRequest: async request => { const result = await suggestionInbox.addRequest(request); if (result.ok) claudeRunner.drain(); return result; } };
-registry.registerAll(buildTools({ focus: { start: (...args) => startFocus(...args), stop: () => stopFocus(false) }, images, writingStyle, hub: lateHub, suggestions: lateSuggestions, webInfo, smartHome, composio, notify, importAssignments: () => importD2LAssignments(), launcher, files, browser, documents, tasks, calendar, memory, research, study, automations, school, guard, getSettings, openExternal, openPath, rootDir, findStudyMaterial, documentsFolder: standardFolder, navigate: (view, extra) => send('nav:go', view, extra) }));
+registry.registerAll(buildTools({ myDay: { plan: tomorrow => planMyDay({ tomorrow }), add: input => addToMyDay(input) }, focus: { start: (...args) => startFocus(...args), stop: () => stopFocus(false) }, images, writingStyle, hub: lateHub, suggestions: lateSuggestions, webInfo, smartHome, composio, notify, importAssignments: () => importD2LAssignments(), launcher, files, browser, documents, tasks, calendar, memory, research, study, automations, school, guard, getSettings, openExternal, openPath, rootDir, findStudyMaterial, documentsFolder: standardFolder, navigate: (view, extra) => send('nav:go', view, extra) }));
 registry.addDynamicProvider(context => composio.sessionTools(context));
 // Lets automated tests call a tool directly. Never set in normal use.
 if (process.env.NEXUS_TEST) globalThis.__nexus = { registry, composio, get phone() { return phone; }, chat };
@@ -311,7 +314,7 @@ function runPhoneRequest(messages) {
   return new Promise(resolve => {
     const made = [];
     let test = '';
-    chat.start({ messages, workProject: { projectTitle: 'Phone' } }, event => {
+    chat.start({ messages }, event => {
       if (event.type === 'tool_end' && event.ok && event.card?.kind === 'image') made.push(event.card.path);
       if (event.type === 'tool_end' && event.ok && event.card?.kind === 'practice-test') test = event.card.id;
       if (event.type === 'done') {
@@ -620,7 +623,15 @@ handle('study:curriculum', () => ({ current: getSettings().study.curriculum, cou
 handle('study:test-generate', async ({ selection, title, subject, counts, instructions, topicToken, topicIds, unitCode }) => {
   const cached = topicToken ? topicCache.get(topicToken) : null;
   const picked = cached ? materialFor(cached.topics, topicIds) : null;
-  const { text, names } = picked ? { text: picked.text, names: cached.names } : await materialFromSelection(selection);
+  let { text, names } = picked ? { text: picked.text, names: cached.names } : await materialFromSelection(selection);
+  // Nothing picked: use the saved notes and D2L pages that match the title, unit or subject, instead of refusing.
+  if (!String(text || '').trim()) {
+    const course = getSettings().study.curriculum;
+    const unitName = course && unitCode ? curriculum.COURSES[course]?.units.find(item => item.code === unitCode)?.name : '';
+    const found = await findStudyMaterial([title, unitName].filter(Boolean).join(' ') || subject || 'science', subject).catch(() => ({ text: '' }));
+    text = found.text; names = found.names || ['Your saved notes'];
+    if (!String(text || '').trim()) throw new Error('NEXUS has no notes saved yet. Add a file in Learn → Library, or get the latest from D2L, then try again.');
+  }
   const topics = picked && topicIds?.length && topicIds.length < cached.topics.length ? picked.titles : [];
   const course = getSettings().study.curriculum;
   const unit = course ? (curriculum.COURSES[course].units.find(item => item.code === unitCode) || curriculum.matchUnit(course, text)) : null;
@@ -636,7 +647,9 @@ handle('study:d2l-test', async ({ ids, subject, count, title, instructions }) =>
 });
 // Assignments and due dates from D2L go into the planner and calendar. Importing again doesn't duplicate them.
 async function importD2LAssignments() {
-  const found = await school.listAssignments();
+  const check = await school.withD2L(async () => ({ found: await school.listAssignments() }));
+  if (!check.ok) return { ok: false, message: check.signIn ? 'D2L signed you out. Open D2L once and sign in; NEXUS keeps you signed in after that.' : check.message };
+  const found = check.found;
   if (!found.ok) return found;
   const planner = await study.listPlanner();
   let added = 0;
@@ -652,7 +665,8 @@ async function importD2LAssignments() {
 handle('school:import-assignments', importD2LAssignments);
 handle('study:tests', () => study.listTests());
 // Quizzes, NotebookLM style: questions are sent to the page one by one as they are written, so the quiz can start at once.
-const FAST_QUIZ_MODEL = 'qwen2.5:3b';
+// The 3B model made up class facts in testing; 7B answered only from the notes and is still quick.
+const FAST_QUIZ_MODEL = 'qwen2.5:7b';
 const quizMaker = createQuizMaker({ models, tests: study.testStore, recordResult: (...args) => study.recordResult(...args), addCard: card => study.addCard(card), listCards: () => study.listCards() });
 const quizRuns = new Map();
 async function quizMaterial({ selection, topicToken, topicIds }) {
@@ -693,7 +707,7 @@ handle('study:quiz-make', async ({ requestId, selection, topicToken, topicIds, d
   const controller = new AbortController();
   quizRuns.set(requestId, controller);
   try {
-    const quiz = await quizMaker.make({ material: text, names, title: title || (topics.length ? `Quiz: ${topics.join(', ')}` : `Quiz: ${names[0] || 'my notes'}`), subject, difficulty, size, focus: [focus, topics.length ? `the topics ${topics.join('; ')}` : ''].filter(Boolean).join('. '), standards, model: fast ? FAST_QUIZ_MODEL : '', signal: controller.signal,
+    const quiz = await quizMaker.make({ topicTitles: topics, material: text, names, title: title || (topics.length ? `Quiz: ${topics.join(', ')}` : `Quiz: ${names[0] || 'my notes'}`), subject, difficulty, size, focus: [focus, topics.length ? `the topics ${topics.join('; ')}` : ''].filter(Boolean).join('. '), standards, model: fast ? FAST_QUIZ_MODEL : '', signal: controller.signal,
       onQuestion: (question, number, total) => send('study:quiz-progress', { requestId, question: withPicture(question), number, total }),
       onStatus: status => send('study:quiz-progress', { requestId, status }) });
     return { ok: true, quiz };
@@ -715,6 +729,55 @@ ${text.slice(0, 12000)}` }
   voice.speak(script);
   return { ok: true, text: script };
 });
+// Mock unit test: every outcome of a unit, timed, written to the curriculum; questions stream in like a quiz.
+handle('study:mock-make', async ({ requestId, unit, count, minutes, difficulty, fast }) => {
+  const units = await findUnits({ documents, school }, unit || '');
+  const chosen = units.find(item => item.name === unit) || units[0];
+  if (!chosen) return { ok: false, message: 'Add a unit document with outcomes in Documents first.' };
+  const allText = chosen.topics.map(topic => topic.text).join('\n');
+  const course = getSettings().study.curriculum;
+  const match = course ? curriculum.matchUnit(course, allText) : null;
+  const standards = match ? curriculum.standardsPrompt(course, match.code) : '';
+  const name = chosen.name.replace(/\.(pdf|docx?)$/i, '').replace(/^\d+--Print;\s*/i, '');
+  const controller = new AbortController();
+  quizRuns.set(requestId, controller);
+  try {
+    const mock = await quizMaker.makeMock({ topics: chosen.topics, count, minutes, difficulty: difficulty || 'hard', title: `Mock unit test: ${name}`, subject: 'Science', names: [chosen.name], standards, model: fast ? FAST_QUIZ_MODEL : '', signal: controller.signal,
+      onQuestion: (question, number, total) => send('study:quiz-progress', { requestId, question, number, total }),
+      onStatus: status => send('study:quiz-progress', { requestId, status }) });
+    return { ok: true, quiz: mock };
+  } finally { quizRuns.delete(requestId); }
+});
+// Mistake notebook: every question missed in the latest try of each quiz or mock test, until it is marked as learned.
+const mistakesDone = new JsonStore(path.join(dataDir, 'mistakes-learned.json'), []);
+async function listMistakes() {
+  const learned = new Set(await mistakesDone.read());
+  const found = [];
+  for (const test of await study.listTests()) {
+    if (!['quiz', 'mock'].includes(test.kind) || !test.attempts?.length) continue;
+    const attempt = test.attempts[0];
+    attempt.results.forEach((result, index) => {
+      const question = test.questions[index];
+      const key = `${test.id}:${question?.id || index}`;
+      if (!question || result.correct || learned.has(key)) return;
+      found.push({ key, quizId: test.id, index, quizTitle: test.title, topic: question.topic || 'General', question: question.question, choices: question.choices, answer: question.answer, chosen: result.chosen || '', explanation: question.explanation || '', quote: question.quote || '', source: question.source || '', location: question.location || '', at: attempt.at });
+    });
+  }
+  return found.sort((a, b) => a.topic.localeCompare(b.topic) || b.at.localeCompare(a.at));
+}
+handle('study:mistakes', () => listMistakes());
+handle('study:mistake-learned', async key => { await mistakesDone.write([...new Set([...(await mistakesDone.read()), String(key)])].slice(-2000)); return { ok: true }; });
+// A retry quiz made from the chosen mistakes, the same questions again, saved like any quiz.
+handle('study:mistakes-quiz', async keys => {
+  const wanted = new Set(Array.isArray(keys) ? keys.map(String) : []);
+  const chosen = (await listMistakes()).filter(item => !wanted.size || wanted.has(item.key)).slice(0, 25);
+  if (!chosen.length) return { ok: false, message: 'No mistakes to practise. Nice work!' };
+  const tests = await study.listTests();
+  const questions = chosen.map(item => ({ ...tests.find(test => test.id === item.quizId).questions[item.index], id: require('crypto').randomUUID() }));
+  const quiz = { id: require('crypto').randomUUID(), kind: 'quiz', title: `Retry: ${chosen.length} mistake${chosen.length === 1 ? '' : 's'}`, subject: '', difficulty: 'mixed', questions, createdAt: new Date().toISOString(), attempts: [] };
+  await study.testStore.upsert(quiz);
+  return { ok: true, quiz };
+});
 handle('study:quiz-cancel', requestId => { quizRuns.get(requestId)?.abort(); return { ok: true }; });
 handle('study:quiz-explain', async ({ quizId, index, chosen, requestId }) => {
   const quiz = await study.getTest(quizId);
@@ -722,7 +785,11 @@ handle('study:quiz-explain', async ({ quizId, index, chosen, requestId }) => {
   if (!question) return { ok: false, message: 'That question no longer exists.' };
   return { ok: true, ...(await quizMaker.explain({ question, chosen, onToken: text => send('study:quiz-explain-token', { requestId, text }) })) };
 });
-handle('study:quiz-finish', input => quizMaker.finish(input));
+handle('study:quiz-finish', async input => {
+  const result = await quizMaker.finish(input);
+  if (Number(input?.seconds) > 0) coach.logTime({ minutes: Number(input.seconds) / 60, kind: 'quiz', topic: result.weak?.[0] || result.topics?.[0]?.topic || '' }).catch(() => {});
+  return result;
+});
 // Morning briefing: once a day after the chosen time, a short rundown of the day, shown, spoken, and sent to the phone.
 const dayStamp = date => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 async function buildBriefing(now = new Date()) {
@@ -736,6 +803,14 @@ async function buildBriefing(now = new Date()) {
   if (events.length) lines.push(`Today: ${events.slice(0, 4).map(event => `${event.title} at ${new Date(event.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`).join('; ')}.`);
   const planner = (await study.listPlanner().catch(() => [])).filter(item => item.when && new Date(item.when) >= now && new Date(item.when) <= week && ['test', 'assignment'].includes(item.kind));
   for (const item of planner.slice(0, 4)) { const days = Math.ceil((new Date(item.when) - now) / 86400000); lines.push(`${item.kind === 'test' ? 'Test' : 'Due'}: ${item.title} ${days <= 1 ? 'tomorrow' : `in ${days} days`}.`); }
+  for (const exam of (await coach.exams().catch(() => [])).filter(item => new Date(item.date).getTime() - now.getTime() < 14 * 86400000)) {
+    const today = await coach.examToday(exam).catch(() => null);
+    if (today) lines.push(`${exam.title} in ${today.days} day${today.days === 1 ? '' : 's'}${today.mark !== null ? ` (predicted mark about ${today.mark}%)` : ''}. Today: ${today.task}`);
+  }
+  for (const extra of await sections.briefing().catch(() => [])) lines.push(extra);
+  const plan = await myDay().catch(() => null);
+  const work = (plan?.blocks || []).filter(block => block.status === 'planned' && !['school', 'routine', 'event', 'prayer', 'break'].includes(block.kind));
+  if (work.length) lines.push(`Your day: ${work.length} thing${work.length === 1 ? '' : 's'} planned, starting with ${work[0].title} at ${new Date(work[0].start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
   const cards = await study.dueCards().catch(() => []);
   if (cards.length) lines.push(`${cards.length} flashcard${cards.length === 1 ? '' : 's'} to review.`);
   try { const quran = JSON.parse(await fs.promises.readFile(path.join(dataDir, 'sections', 'quran', 'progress.json'), 'utf8')); const due = Object.values(quran.ayahs || {}).filter(entry => entry.due <= now.getTime()).length; if (due) lines.push(`${due} Quran ayah${due === 1 ? '' : 's'} due for review.`); } catch {}
@@ -778,6 +853,7 @@ async function stopFocus(finished = false) {
   if (!focus) return focusStatus();
   clearInterval(focus.timer);
   const minutes = focus.minutes;
+  coach.logTime({ minutes: (Date.now() - (focus.endsAt - focus.minutes * 60000)) / 60000, kind: 'focus' }).catch(() => {});
   focus = null;
   await setWindowsDoNotDisturb(false).catch(() => {});
   send('system:focus', focusStatus());
@@ -801,8 +877,47 @@ handle('system:focus-status', () => focusStatus());
 handle('system:running-apps', async () => (await listRunningApps().catch(() => [])).map(item => item.name).filter((name, index, list) => list.indexOf(name) === index).sort());
 // Homework tracker: while the D2L window is open and signed in, new assignments are picked up every half hour and
 // announced; and anything in the planner due within a day gets one reminder. Nothing opens a window by itself.
+const subjectOfCourse = name => (/science|bio|chem|phys/i.test(name) ? 'Science' : /math/i.test(name) ? 'Math' : /social|history|geo/i.test(name) ? 'Social Studies' : /english|ela|language arts/i.test(name) ? 'English' : 'Science');
+const backgroundFile = path.join(dataDir, 'd2l-background.json');
+const readBackground = () => fs.promises.readFile(backgroundFile, 'utf8').then(JSON.parse).catch(() => ({}));
+// The teacher's tests, quizzes, and review sheets found on D2L go to Teacher Mode for that course.
+async function feedTeacherFromLibrary(items) {
+  const library = await school.readD2LLibrary();
+  let fed = 0;
+  for (const item of items) {
+    if (!/\b(test|quiz|exam|review|worksheet|practice|assessment)\b/i.test(item.title)) continue;
+    const saved = library.find(entry => entry.id === item.id);
+    if (!saved || d2lReadingLength(saved.text) < 200) continue;
+    await coach.teacherAdd({ course: item.course || saved.course || 'My class', name: saved.title, text: cleanD2LText(saved.text), kind: /quiz/i.test(saved.title) ? 'quiz' : /worksheet|practice/i.test(saved.title) ? 'worksheet' : /review/i.test(saved.title) ? 'review' : 'test' }).then(() => fed++).catch(() => {});
+  }
+  return fed;
+}
+// D2L is checked hidden, with the saved sign-in: new assignments and grades every half hour, and each course's
+// content once a week. When D2L asks for a sign-in again, the person is told once, and the check waits for them.
+async function checkD2LInBackground({ scan = false } = {}) {
+  const state = await readBackground();
+  const weekly = scan || !state.lastScan || Date.now() - new Date(state.lastScan).getTime() > 7 * 86400000;
+  const result = await school.backgroundCheck(async () => {
+    const imported = await importD2LAssignments().catch(() => null);
+    const found = await school.listGrades().catch(() => null);
+    const newGrades = [];
+    for (const grade of found?.grades || []) { const added = await coach.gradeAdd({ ...grade, source: 'd2l', externalId: `d2l-${grade.id}` }).catch(() => null); if (added?.grade) newGrades.push(added.grade); }
+    let scanned = null;
+    if (weekly) { scanned = await school.scanAllCourses(subjectOfCourse).catch(() => null); if (scanned) scanned.fed = await feedTeacherFromLibrary(scanned.items || []); }
+    return { imported, newGrades, scanned };
+  });
+  const next = { ...state, lastCheck: new Date().toISOString(), ok: result.ok, signInNeeded: Boolean(result.signIn), message: result.ok ? '' : result.message };
+  if (result.ok && result.scanned) next.lastScan = new Date().toISOString();
+  if (result.signIn && !state.signInNeeded) await notify({ title: 'D2L needs you to sign in', body: 'NEXUS checks D2L for you in the background, but D2L signed you out. Open NEXUS → School → Open D2L and sign in once; NEXUS takes it from there.', kind: 'info' });
+  await fs.promises.writeFile(backgroundFile, JSON.stringify(next));
+  if (result.ok && result.newGrades?.length) await notify({ title: `New mark${result.newGrades.length === 1 ? '' : 's'} on D2L`, body: result.newGrades.slice(0, 4).map(grade => `${grade.title}: ${grade.percent}%`).join('; '), kind: 'info' });
+  return { ...next, imported: result.imported, newGrades: result.newGrades || [], scanned: result.scanned ? { courses: result.scanned.scanned, pages: result.scanned.added, teacher: result.scanned.fed } : null };
+}
+handle('school:background-status', () => readBackground());
+handle('school:check-now', () => checkD2LInBackground({ scan: true }));
 async function trackHomework() {
-  const imported = await importD2LAssignments().catch(() => null);
+  const check = await checkD2LInBackground().catch(() => null);
+  const imported = check?.imported;
   if (imported?.ok && imported.added) {
     const fresh = imported.assignments.slice(-imported.added);
     await notify({ title: `${imported.added} new assignment${imported.added === 1 ? '' : 's'} on D2L`, body: fresh.slice(0, 4).map(item => `${item.title}${item.due ? `, due ${new Date(item.due).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}` : ''}`).join('; '), kind: 'info' });
@@ -821,18 +936,110 @@ async function trackHomework() {
 }
 // The phone page: chat, today, tasks, flashcards, and quizzes, for a phone's browser. Off until switched on.
 const { createWebPhone } = require('./backend/integrations/webPhone');
+const { execFile } = require('child_process');
 const QRCode = require('qrcode');
 const pendingAsks = new Map();
+// Push notifications to phones that turned them on. They need the secure link, since phones only allow push on https.
+const webPush = require('web-push');
+const pushFile = path.join(dataDir, 'phone-push.json');
+async function pushState() {
+  let state = await fs.promises.readFile(pushFile, 'utf8').then(JSON.parse).catch(() => null);
+  if (!state?.publicKey) { state = { ...webPush.generateVAPIDKeys(), subscriptions: [] }; await fs.promises.writeFile(pushFile, JSON.stringify(state)); }
+  return state;
+}
+async function pushToPhones(title, body, extra = {}) {
+  const state = await pushState();
+  if (!state.subscriptions.length) return false;
+  const keep = [];
+  for (const subscription of state.subscriptions) {
+    try { await webPush.sendNotification(subscription, JSON.stringify({ title, body, ...extra }), { vapidDetails: { subject: 'mailto:nexus@localhost.invalid', publicKey: state.publicKey, privateKey: state.privateKey }, TTL: 3600 }); keep.push(subscription); }
+    catch (error) { if (![404, 410].includes(error.statusCode)) keep.push(subscription); }
+  }
+  if (keep.length !== state.subscriptions.length) await fs.promises.writeFile(pushFile, JSON.stringify({ ...state, subscriptions: keep }));
+  return keep.length > 0;
+}
+// Quick questions on the phone: a few times a day, between set times, one question arrives as a notification. Tapping it
+// opens the question on the phone page. They come from your mistakes and weak topics first, then your other quizzes.
+const quickFile = path.join(dataDir, 'phone-quiz.json');
+const readQuick = async () => ({ on: false, perDay: 3, from: '15:30', to: '20:30', sent: [], answered: [], ...(await fs.promises.readFile(quickFile, 'utf8').then(JSON.parse).catch(() => ({})) ) });
+const saveQuick = state => fs.promises.writeFile(quickFile, JSON.stringify({ ...state, sent: state.sent.slice(-200), answered: state.answered.slice(-300) }));
+const clockMinutes = text => { const [hours, minutes] = String(text || '0:0').split(':').map(Number); return (hours || 0) * 60 + (minutes || 0); };
+async function quickPool() {
+  const pool = [];
+  const weak = new Set((await study.weakTopics().catch(() => [])).map(item => item.topic));
+  for (const item of await listMistakes().catch(() => [])) pool.push({ id: `${item.quizId}:${item.index}`, weight: 4 });
+  for (const test of await study.listTests().catch(() => [])) {
+    (test.questions || []).forEach((question, index) => { if (question.choices && question.answer) pool.push({ id: `${test.id}:${index}`, weight: weak.has(question.topic) ? 3 : 1 }); });
+  }
+  return pool;
+}
+async function quickQuestion(id) {
+  const [quizId, index] = String(id || '').split(':');
+  const test = quizId ? await study.getTest(quizId) : null;
+  const question = test?.questions?.[Number(index)];
+  if (!question?.choices || !question.answer) return null;
+  return { id: `${quizId}:${Number(index)}`, quiz: test.title, question: question.question, choices: question.choices, hint: question.hint || '', topic: question.topic || '' };
+}
+// Picks one, leaving out ones asked in the last few days, and leaning toward mistakes and weak topics.
+async function pickQuick() {
+  const state = await readQuick();
+  const recent = new Set(state.sent.filter(item => Date.now() - item.at < 3 * 86400000).map(item => item.id));
+  const pool = (await quickPool()).filter(item => !recent.has(item.id));
+  const all = pool.length ? pool : await quickPool();
+  if (!all.length) return null;
+  let roll = Math.random() * all.reduce((sum, item) => sum + item.weight, 0);
+  const chosen = all.find(item => (roll -= item.weight) <= 0) || all[0];
+  return quickQuestion(chosen.id);
+}
+async function sendQuick({ force = false } = {}) {
+  const state = await readQuick();
+  const now = new Date();
+  const today = dayStamp(now);
+  const sentToday = state.sent.filter(item => dayStamp(new Date(item.at)) === today);
+  if (!force) {
+    if (!state.on) return { ok: false, message: 'Quick questions are off.' };
+    const minute = now.getHours() * 60 + now.getMinutes();
+    const start = clockMinutes(state.from); const end = clockMinutes(state.to);
+    if (minute < start || minute > end || sentToday.length >= state.perDay) return { ok: false, message: 'Not time for one.' };
+    // Spread out across the window: the next one is due after an even share of it has passed.
+    const gap = (end - start) / Math.max(1, state.perDay);
+    const last = state.sent.at(-1);
+    if (minute < start + gap * sentToday.length || (last && Date.now() - last.at < gap * 60000 * 0.8)) return { ok: false, message: 'Not time for one.' };
+  }
+  const question = await pickQuick();
+  if (!question) return { ok: false, message: 'Make a quiz first, so NEXUS has questions to send.' };
+  const delivered = await pushToPhones('📚 Quick question', `${question.question}\nTap to answer.`, { url: `/?quick=${encodeURIComponent(question.id)}`, tag: 'nexus-quick' });
+  if (!delivered) return { ok: false, message: 'Turn on notifications on your phone first (Today tab, over the secure link).' };
+  state.sent.push({ id: question.id, at: Date.now() });
+  await saveQuick(state);
+  return { ok: true, question };
+}
+// The secure link: Tailscale serves the phone page over https at this PC's Tailscale name.
+const tailscaleExe = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Tailscale', 'tailscale.exe');
+const runTailscale = args => new Promise(resolve => execFile(tailscaleExe, args, { windowsHide: true, timeout: 60000 }, (error, stdout, stderr) => resolve({ ok: !error, out: String(stdout || ''), err: String(stderr || error?.message || '') })));
+async function secureLinkStatus() {
+  if (!fs.existsSync(tailscaleExe)) return { available: false, message: 'Tailscale is not installed on this PC.' };
+  const status = await runTailscale(['status', '--json']);
+  let info = {};
+  try { info = JSON.parse(status.out); } catch {}
+  const name = String(info.Self?.DNSName || '').replace(/\.$/, '');
+  const httpsOn = Array.isArray(info.CertDomains) && info.CertDomains.length > 0;
+  const serve = await runTailscale(['serve', 'status', '--json']);
+  let served = false;
+  try { served = JSON.stringify(JSON.parse(serve.out || '{}')).includes(String(webPhone.status().port)); } catch {}
+  return { available: true, name, httpsOn, served, url: served && name ? `https://${name}/` : '' };
+}
 let awakeBlocker = null;
-const webPhone = createWebPhone({ dataDir, pageFile: path.join(rootDir, 'frontend-phone', 'index.html'), logger, api: {
+const webPhone = createWebPhone({ dataDir, pageFile: path.join(rootDir, 'frontend-phone', 'index.html'), logger, ...(process.env.NEXUS_TEST ? { port: Number(process.env.NEXUS_PHONE_PORT) || 47821 } : {}), api: {
   // A chat from the phone runs one request at a time; approvals for risky actions are asked on the phone.
   async chat(messages, sendEvent, closed) {
     if (webPhoneRun) { sendEvent({ type: 'error', message: 'Nexus is still working on your last request.' }); return; }
-    const clean = messages.filter(item => ['user', 'assistant'].includes(item?.role) && typeof item.content === 'string').map(item => ({ role: item.role, content: item.content.slice(0, 4000) }));
+    // A photo from the phone travels with its message, and NEXUS's vision model looks at it on this PC.
+    const clean = messages.filter(item => ['user', 'assistant'].includes(item?.role) && typeof item.content === 'string').map((item, index, list) => ({ role: item.role, content: item.content.slice(0, 4000), ...(index === list.length - 1 && Array.isArray(item.imageData) ? { imageData: item.imageData.filter(data => typeof data === 'string' && data.length < 6e6).slice(0, 2) } : {}) }));
     webPhoneRun = { ask: ({ message }) => new Promise(resolve => { const id = crypto.randomUUID(); pendingAsks.set(id, resolve); sendEvent({ type: 'confirm', id, message }); setTimeout(() => { if (pendingAsks.delete(id)) resolve(false); }, 120000); }) };
     try {
       await new Promise(resolve => {
-        chat.start({ messages: clean, workProject: { projectTitle: 'Phone' } }, event => {
+        chat.start({ messages: clean }, event => {
           if (!closed()) sendEvent(event);
           if (['done', 'error', 'cancelled'].includes(event.type)) resolve();
         }).then(started => { if (started?.ok === false) { sendEvent({ type: 'error', message: started.message }); resolve(); } }).catch(error => { sendEvent({ type: 'error', message: error.message }); resolve(); });
@@ -841,6 +1048,44 @@ const webPhone = createWebPhone({ dataDir, pageFile: path.join(rootDir, 'fronten
   },
   routes: {
     'GET ping': async () => ({ ok: true }),
+    'GET push/key': async () => ({ ok: true, key: (await pushState()).publicKey }),
+    'POST push/subscribe': async ({ subscription }) => {
+      if (!subscription?.endpoint || !/^https:\/\//.test(subscription.endpoint)) return { ok: false, message: 'That is not a push subscription.' };
+      const state = await pushState();
+      state.subscriptions = [...state.subscriptions.filter(item => item.endpoint !== subscription.endpoint), subscription].slice(-10);
+      await fs.promises.writeFile(pushFile, JSON.stringify(state));
+      await pushToPhones('NEXUS notifications are on', 'Reminders and updates will show up here.');
+      return { ok: true };
+    },
+    'GET now': async () => ({ ok: true, items: await whatNow() }),
+    'GET day': async () => ({ ok: true, plan: await myDay() }),
+    'POST day/mark': async input => ({ ok: true, plan: await dayPlanner.mark({ id: String(input.id || ''), status: input.status }) }),
+    'POST day/plan': async () => ({ ok: true, plan: await planMyDay() }),
+    'POST day/add': async input => ({ ok: true, plan: await addToMyDay({ title: String(input.title || '').slice(0, 180), minutes: input.minutes, important: input.important }) }),
+    'GET quick/settings': async () => { const { on, perDay, from, to, answered } = await readQuick(); const today = answered.filter(item => dayStamp(new Date(item.at)) === dayStamp(new Date())); return { ok: true, on, perDay, from, to, today: { answered: today.length, right: today.filter(item => item.right).length } }; },
+    'POST quick/settings': async input => {
+      const state = await readQuick();
+      const time = value => (/^\d{1,2}:\d{2}$/.test(String(value)) ? String(value).padStart(5, '0') : null);
+      Object.assign(state, { on: input.on === undefined ? state.on : Boolean(input.on), perDay: Math.max(1, Math.min(8, Math.round(Number(input.perDay) || state.perDay))), from: time(input.from) || state.from, to: time(input.to) || state.to });
+      if (clockMinutes(state.to) <= clockMinutes(state.from)) return { ok: false, message: 'The end time has to be after the start time.' };
+      await saveQuick(state);
+      return { ok: true, on: state.on, perDay: state.perDay, from: state.from, to: state.to };
+    },
+    'POST quick/get': async ({ id }) => { const question = id ? await quickQuestion(id) : await pickQuick(); if (!question) return { ok: false, message: id ? 'That question is no longer saved. Try another one.' : 'Make a quiz first, so NEXUS has questions to ask.' }; return { ok: true, question }; },
+    'POST quick/answer': async ({ id, letter }) => {
+      const [quizId, index] = String(id || '').split(':');
+      const test = await study.getTest(quizId);
+      const question = test?.questions?.[Number(index)];
+      if (!question) return { ok: false, message: 'That question is no longer saved.' };
+      const right = String(letter).toUpperCase() === question.answer;
+      await study.recordResult(question.topic || 'Quick questions', right, test.subject || '').catch(() => {});
+      coach.logTime({ minutes: 1, kind: 'phone', topic: question.topic || '' }).catch(() => {});
+      const state = await readQuick();
+      state.answered.push({ id: String(id), at: Date.now(), right });
+      await saveQuick(state);
+      return { ok: true, right, answer: question.answer, explanation: question.explanation || '', choice: question.choices[question.answer] };
+    },
+    'POST quick/send-now': async () => sendQuick({ force: true }),
     'POST confirm': async ({ id, ok }) => { const resolve = pendingAsks.get(id); if (resolve) { pendingAsks.delete(id); resolve(Boolean(ok)); } return { ok: true }; },
     'GET today': async () => { const now = new Date(); const lines = await buildBriefing(now); const hour = now.getHours(); return { ok: true, greeting: `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}${getSettings().general.userName ? `, ${getSettings().general.userName}` : ''}`, lines }; },
     'GET tasks': async () => ({ ok: true, tasks: (await tasks.list()).filter(task => task.status !== 'complete' && !task.done).map(task => ({ id: task.id, title: task.text || task.title || '', dueDate: task.dueDate, priority: task.priority })).slice(0, 60) }),
@@ -872,7 +1117,18 @@ handle('system:phone-page', async ({ on, stayAwake } = {}) => {
 });
 handle('system:phone-page-status', () => phonePageStatus());
 handle('system:phone-page-new-key', async () => { await webPhone.resetKey(); return phonePageStatus(); });
-if (process.env.NEXUS_TEST) globalThis.__nexusWebPhone = webPhone;
+handle('system:secure-link-status', () => secureLinkStatus());
+handle('system:qr', text => QRCode.toDataURL(String(text).slice(0, 500), { margin: 1, width: 240 }));
+// Turning on the secure link changes Tailscale's settings on this PC, so it only happens when the person presses the button.
+handle('system:secure-link', async ({ on }) => {
+  const status = await secureLinkStatus();
+  if (!status.available) return { ok: false, message: status.message };
+  if (on && !status.httpsOn) return { ok: false, message: 'Turn on HTTPS for your Tailscale account first (step 1).' };
+  const result = on ? await runTailscale(['serve', '--bg', String(webPhone.status().port)]) : await runTailscale(['serve', 'reset']);
+  if (!result.ok) return { ok: false, message: `Tailscale said: ${(result.err || result.out).trim().split(/\r?\n/)[0].slice(0, 200)}` };
+  return { ok: true, ...(await secureLinkStatus()) };
+});
+if (process.env.NEXUS_TEST) { globalThis.__nexusWebPhone = webPhone; globalThis.__nexusBriefing = buildBriefing; }
 
 handle('system:briefing', () => morningBriefing({ force: true }));
 
@@ -912,6 +1168,267 @@ handle('study:planner-update', (id, changes) => study.updatePlanner(id, { done: 
 handle('study:planner-remove', id => study.removePlanner(id));
 handle('study:priorities', () => study.priorities());
 handle('study:progress', () => study.progress());
+// ---------- The study coach ----------
+handle('coach:teachers', () => coach.teacherList());
+handle('coach:teacher-add-files', async ({ course, kind }) => {
+  const picked = await dialog.showOpenDialog(mainWindow, { title: 'Your teacher\'s tests, quizzes, or worksheets', properties: ['openFile', 'multiSelections'], filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'pptx', 'txt', 'md', 'png', 'jpg', 'jpeg'] }] });
+  if (picked.canceled) return { ok: false, cancelled: true };
+  let added = 0; const failed = [];
+  for (const file of picked.filePaths.slice(0, 20)) {
+    try { const result = await readDocument(rootDir, file, 40000); await coach.teacherAdd({ course, name: path.basename(file), text: result.text, kind }); added++; }
+    catch (error) { failed.push(`${path.basename(file)}: ${error.message}`); }
+  }
+  return { ok: added > 0, added, failed, message: added ? `Added ${added} file${added === 1 ? '' : 's'}.` : failed[0] || 'Nothing was added.' };
+});
+handle('coach:teacher-add-text', input => coach.teacherAdd(input));
+handle('coach:teacher-add-library', async ({ course, ids }) => {
+  const library = await school.readD2LLibrary();
+  let added = 0;
+  for (const item of library.filter(entry => (ids || []).includes(entry.id))) { await coach.teacherAdd({ course, name: item.title, text: item.provider === 'local' ? item.text : cleanD2LText(item.text), kind: /quiz/i.test(item.title) ? 'quiz' : /worksheet|practice/i.test(item.title) ? 'worksheet' : 'test' }).then(() => added++).catch(() => {}); }
+  return { ok: added > 0, added };
+});
+handle('coach:teacher-remove', input => coach.teacherRemoveSample(input));
+handle('coach:teacher-analyze', course => coach.teacherAnalyze(course));
+handle('coach:teacher-compare', async ({ course, text }) => {
+  let body = String(text || '');
+  if (!body.trim()) {
+    const picked = await dialog.showOpenDialog(mainWindow, { title: 'The real test, after you got it back', properties: ['openFile'], filters: [{ name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'png', 'jpg', 'jpeg'] }] });
+    if (picked.canceled) return { ok: false, cancelled: true };
+    body = (await readDocument(rootDir, picked.filePaths[0], 40000)).text;
+  }
+  const lastPrediction = (await study.listTests()).filter(item => item.kind === 'predicted' && item.course === course).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+  return { ok: true, ...(await coach.teacherCompare({ course, text: body, predicted: lastPrediction?.outcomes || [] })) };
+});
+// The predicted test: a mock test on the unit, in the teacher's style, weighted toward the outcomes they test most.
+handle('coach:predict-test', async ({ requestId, course, unit, count = 20, minutes = 45 }) => {
+  const style = await coach.teacherStyle(course);
+  if (!style) return { ok: false, message: 'Teach NEXUS about your teacher first: add some of their tests or quizzes, then press "Learn my teacher".' };
+  const units = await findUnits({ documents, school }, unit || '');
+  const chosen = units.find(item => item.name === unit) || units[0];
+  if (!chosen) return { ok: false, message: 'Add the unit document with its outcomes in Documents first.' };
+  const codeOf = topic => (String(topic.title).match(/\b([1-9][A-D])\b/) || [])[1] || '';
+  const weights = chosen.topics.map(topic => style.weights[codeOf(topic)] ?? (Object.keys(style.weights).length ? 1 : 5));
+  const outcomes = Object.keys(style.weights).filter(code => chosen.topics.some(topic => codeOf(topic) === code));
+  const controller = new AbortController();
+  quizRuns.set(requestId, controller);
+  try {
+    const name = chosen.name.replace(/\.(pdf|docx?)$/i, '').replace(/^\d+--Print;\s*/i, '');
+    const test = await quizMaker.makeMock({ topics: chosen.topics, weights, count, minutes, difficulty: 'hard', title: `Predicted test: ${name}`, subject: subjectOfCourse(course), names: [chosen.name], standards: style.instructions, kind: 'mock', extra: { predicted: true, course, outcomes }, signal: controller.signal,
+      onQuestion: (question, number, total) => send('study:quiz-progress', { requestId, question, number, total }),
+      onStatus: status => send('study:quiz-progress', { requestId, status }) });
+    return { ok: true, quiz: test, weights: style.weights };
+  } finally { quizRuns.delete(requestId); }
+});
+handle('coach:predict-mark', input => coach.predictMark(input || {}));
+handle('coach:exams', async () => Promise.all((await coach.exams()).map(exam => coach.examToday(exam))));
+handle('coach:exam-add', async input => { const exam = await coach.examAdd(input); await study.addPlannerItem({ kind: 'test', title: exam.title, when: exam.date, subject: exam.course }).catch(() => {}); return exam; });
+handle('coach:exam-remove', id => coach.examRemove(id));
+handle('coach:grades', () => coach.gradeSummary());
+handle('coach:grade-add', input => coach.gradeAdd({ ...input, outcomes: Object.keys(codesIn(input?.title || '')) }));
+handle('coach:grade-remove', id => coach.gradeRemove(id));
+handle('coach:time-stats', () => coach.timeStats());
+handle('coach:log-time', input => coach.logTime(input || {}));
+handle('coach:teach-back', async ({ topic, explanation }) => coach.teachBack({ topic, explanation, material: (await findStudyMaterial(String(topic || '')).catch(() => ({ text: '' }))).text }));
+handle('coach:rubric', input => coach.rubricCheck(input || {}));
+handle('coach:assignment-guide', async input => {
+  const task = String(input?.task || '');
+  const notes = task ? (await findStudyMaterial(task).catch(() => ({ text: '' }))).text : '';
+  return coach.assignmentGuide({ ...input, notes });
+});
+handle('coach:guides', () => coach.guides());
+// The guide's steps become tasks, spread out so the last one is done the day before it's due; My Day then fits them in.
+handle('coach:guide-to-day', async ({ id }) => {
+  const guide = (await coach.guides()).find(item => item.id === id);
+  if (!guide) return { ok: false, message: 'That guide is no longer saved.' };
+  const end = guide.due ? new Date(`${String(guide.due).slice(0, 10)}T20:00`).getTime() - 86400000 : Date.now() + 5 * 86400000;
+  const span = Math.max(3600000, end - Date.now());
+  for (const [index, step] of guide.steps.entries()) {
+    await tasks.create({ title: `${guide.title ? `${guide.title}: ` : ''}${step.title}`.slice(0, 180), description: step.detail, dueDate: new Date(Date.now() + span * (index + 1) / guide.steps.length).toISOString(), priority: 'medium', minutes: step.minutes, category: 'Assignment' });
+  }
+  await planMyDay().catch(() => {});
+  return { ok: true, added: guide.steps.length };
+});
+// A file's text for the rubric check, chosen by the person.
+handle('coach:read-file', async ({ title } = {}) => {
+  const picked = await dialog.showOpenDialog(mainWindow, { title: String(title || 'Choose a file').slice(0, 60), properties: ['openFile'], filters: [{ name: 'Documents and photos', extensions: ['pdf', 'docx', 'pptx', 'txt', 'md', 'png', 'jpg', 'jpeg'] }] });
+  if (picked.canceled) return { ok: false, cancelled: true };
+  try {
+    const result = await readDocument(rootDir, picked.filePaths[0], 20000);
+    if (!String(result.text || '').trim()) return { ok: false, message: 'NEXUS found no text in that file.' };
+    return { ok: true, name: path.basename(picked.filePaths[0]), text: String(result.text).trim() };
+  } catch (error) { return { ok: false, message: `That file couldn't be read: ${error.message}` }; }
+});
+handle('coach:vocab', async ({ selection, topic, subject }) => {
+  const material = selection ? (await materialFromSelection(selection)).text : (await findStudyMaterial(String(topic || '')).catch(() => ({ text: '' }))).text;
+  return coach.vocabulary({ material, topic: topic || 'Vocabulary', subject });
+});
+handle('coach:weekly-plan', async ({ make } = {}) => {
+  const existing = await coach.lastPlan();
+  if (!make && existing && Date.now() - new Date(existing.madeAt).getTime() < 7 * 86400000) return existing;
+  return coach.weeklyPlan({ planner: await study.listPlanner().catch(() => []), cardsDue: (await study.dueCards().catch(() => [])).length, mistakes: (await listMistakes().catch(() => [])).length });
+});
+// "What should I do right now?": everything that needs the person, ranked.
+async function whatNow() {
+  const items = [];
+  const now = Date.now();
+  const background = await readBackground();
+  if (background.signInNeeded) items.push({ score: 100, title: 'Sign in to D2L', detail: 'D2L signed you out, so NEXUS can\'t check it for you.', action: { kind: 'd2l-sign-in' } });
+  for (const item of await study.listPlanner().catch(() => [])) {
+    if (item.done || item.kind !== 'assignment' || !item.when) continue;
+    const hours = (new Date(item.when).getTime() - now) / 3600000;
+    if (hours < -48 || hours > 72) continue;
+    items.push({ score: hours < 0 ? 95 : 90 - hours / 2, title: hours < 0 ? `Overdue: ${item.title}` : `Finish ${item.title}`, detail: hours < 0 ? 'This was due already.' : `Due ${new Date(item.when).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}${item.subject ? `, ${item.subject}` : ''}.`, action: { kind: 'assignments' } });
+  }
+  for (const exam of await coach.exams().catch(() => [])) {
+    const today = await coach.examToday(exam).catch(() => null);
+    if (!today || today.days > 14) continue;
+    items.push({ score: 85 - today.days * 2, title: `${exam.title} in ${today.days} day${today.days === 1 ? '' : 's'}`, detail: today.task, action: { kind: today.days <= 2 ? 'mock' : 'quizzes' } });
+  }
+  const mistakes = (await listMistakes().catch(() => [])).length;
+  if (mistakes) items.push({ score: 50 + Math.min(20, mistakes), title: `Fix ${mistakes} mistake${mistakes === 1 ? '' : 's'}`, detail: 'Go over the questions you got wrong before they become habits.', action: { kind: 'mistakes' } });
+  const cards = (await study.dueCards().catch(() => [])).length;
+  if (cards) items.push({ score: 40 + Math.min(20, cards / 2), title: `Review ${cards} flashcard${cards === 1 ? '' : 's'}`, detail: 'About a minute for every 5 cards.', action: { kind: 'flashcards' } });
+  const weak = (await study.weakTopics().catch(() => []))[0];
+  if (weak) items.push({ score: 45, title: `Practise ${weak.topic}`, detail: `Your weakest topic right now, at ${weak.accuracy}%.`, action: { kind: 'quizzes' } });
+  for (const extra of await sections.whatNow().catch(() => [])) items.push(extra);
+  return items.sort((a, b) => b.score - a.score).slice(0, 6);
+}
+handle('coach:now', () => whatNow());
+// ---------- My Day ----------
+const { createDayPlanner } = require('./backend/productivity/dayPlanner');
+const dayPlanner = createDayPlanner({ dataDir });
+// Everything to fit into the free time, with how long it takes and how much it matters.
+async function dayTodo(date) {
+  const todo = [];
+  const end = new Date(date); end.setHours(23, 59, 59, 999);
+  const daysUntil = when => (new Date(when).getTime() - end.getTime()) / 86400000;
+  for (const item of await study.listPlanner().catch(() => [])) {
+    if (item.done || item.kind !== 'assignment' || !item.when) continue;
+    const days = daysUntil(item.when);
+    if (days > 4 || days < -3) continue;
+    todo.push({ key: `planner-${item.id}`, title: days < 0 ? `Catch up: ${item.title}` : item.title, detail: `Due ${new Date(item.when).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}${item.subject ? `, ${item.subject}` : ''}`, minutes: days <= 1 ? 60 : 45, score: 92 - Math.max(0, days) * 6, kind: 'assignment', action: { kind: 'assignments' } });
+  }
+  for (const exam of await coach.exams().catch(() => [])) {
+    const today = await coach.examToday(exam).catch(() => null);
+    if (!today || today.days > 14) continue;
+    todo.push({ key: `exam-${exam.id}`, title: `Study for ${exam.title}`, detail: today.task, minutes: today.days <= 2 ? 60 : 30, score: 86 - today.days * 2, kind: 'test', action: { kind: today.days <= 2 ? 'mock' : 'quizzes' } });
+  }
+  for (const task of await tasks.list().catch(() => [])) {
+    if (task.status === 'complete' || task.done) continue;
+    const due = task.dueDate ? daysUntil(task.dueDate) : null;
+    if (due === null && task.priority !== 'high') continue;
+    if (due !== null && due > 2) continue;
+    todo.push({ key: `task-${task.id}`, title: task.text || task.title, detail: task.dueDate ? `Task, due ${new Date(task.dueDate).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}` : 'High-priority task', minutes: Number(task.minutes) || 30, score: (due !== null && due < 0 ? 90 : 72) + (task.priority === 'high' ? 8 : 0), kind: 'task', action: { kind: 'tasks' } });
+  }
+  const mistakes = (await listMistakes().catch(() => [])).length;
+  if (mistakes) todo.push({ key: 'mistakes', title: 'Mistake notebook', detail: `${mistakes} question${mistakes === 1 ? '' : 's'} to fix`, minutes: 15, score: 55, kind: 'study', action: { kind: 'mistakes' } });
+  const cards = (await study.dueCards().catch(() => [])).length;
+  if (cards) todo.push({ key: 'cards', title: 'Flashcards', detail: `${cards} due`, minutes: Math.max(10, Math.min(30, Math.round(cards / 5))), score: 50, kind: 'study', action: { kind: 'flashcards' } });
+  const weak = (await study.weakTopics().catch(() => []))[0];
+  if (weak) todo.push({ key: 'weak', title: `Practise ${weak.topic}`, detail: `Weakest topic, at ${weak.accuracy}%`, minutes: 20, score: 45, kind: 'study', action: { kind: 'quizzes' } });
+  for (const item of await sections.whatNow().catch(() => [])) if (item.score < 95) todo.push({ key: `section-${item.title}`, title: item.title, detail: item.detail, minutes: 15, score: item.score, kind: 'quran', action: item.action });
+  return todo;
+}
+async function dayFixed(date) {
+  const start = new Date(date); start.setHours(0, 0, 0, 0);
+  const end = new Date(date); end.setHours(23, 59, 59, 999);
+  const events = (await calendar.listEvents({ from: start.toISOString(), to: end.toISOString() }).catch(() => [])).filter(event => !['assignment', 'study'].includes(event.kind));
+  return [...events.map(event => ({ title: event.title, start: event.start, end: event.end, kind: 'event' })), ...await sections.dayBlocks(date).catch(() => [])];
+}
+async function planMyDay({ tomorrow = false } = {}) {
+  const date = new Date(); if (tomorrow) { date.setDate(date.getDate() + 1); date.setHours(12, 0, 0, 0); }
+  const plan = await dayPlanner.build({ date, fixed: await dayFixed(date), todo: await dayTodo(date) });
+  if (!tomorrow) send('day:changed', plan);
+  return plan;
+}
+async function addToMyDay({ title, minutes, important }) {
+  if (!String(title || '').trim()) throw new Error('Say what to add.');
+  const today = new Date(); today.setHours(21, 0, 0, 0);
+  await tasks.create({ title, dueDate: today.toISOString(), priority: important ? 'high' : 'medium', minutes: Math.max(10, Math.min(240, Math.round(Number(minutes) || 30))) });
+  return planMyDay();
+}
+// Today's plan, made fresh when there is none, or when it is from before the last change in the day's inputs (every 2 hours).
+async function myDay() {
+  const plan = await dayPlanner.get();
+  if (plan && Date.now() - new Date(plan.madeAt).getTime() < 2 * 3600000) return plan;
+  return planMyDay();
+}
+handle('day:get', () => myDay());
+handle('day:plan', ({ tomorrow } = {}) => planMyDay({ tomorrow: Boolean(tomorrow) }));
+handle('day:mark', async input => { const plan = await dayPlanner.mark(input || {}); const block = plan.blocks.find(item => item.id === input.id); if (block?.key?.startsWith('task-') && block.status === 'done') await tasks.update({ id: block.key.slice(5), done: true }).catch(() => {}); if (block?.key?.startsWith('planner-') && block.status === 'done' && !plan.blocks.some(item => item.key === block.key && item.status === 'planned')) await study.updatePlanner(block.key.slice(8), { done: true }).catch(() => {}); send('day:changed', plan); return plan; });
+handle('day:add', input => addToMyDay(input || {}));
+handle('day:routine', () => dayPlanner.routine());
+handle('day:routine-set', async input => { const routine = await dayPlanner.setRoutine(input || {}); await planMyDay(); return routine; });
+// Alerts as each block starts, a new plan each morning, and a short review in the evening.
+async function dayTick() {
+  if (process.env.NEXUS_TEST) return;
+  const routine = await dayPlanner.routine();
+  const now = new Date();
+  const minute = now.getHours() * 60 + now.getMinutes();
+  const [wakeH, wakeM] = routine.wake.split(':').map(Number);
+  const [bedH, bedM] = routine.bed.split(':').map(Number);
+  if (minute >= wakeH * 60 + wakeM && minute < bedH * 60 + bedM) await myDay();
+  for (const block of await dayPlanner.starting()) {
+    const until = new Date(block.end).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    await notify({ title: `Time for: ${block.title}`, body: `${block.detail ? `${block.detail}. ` : ''}Until ${until}.`, kind: 'info' });
+    if (getSettings().voice.spokenReplies) voice.speak(`Time for ${block.title}.`);
+  }
+  const reviewFile = path.join(dataDir, 'my-day', 'reviewed.json');
+  const reviewed = await fs.promises.readFile(reviewFile, 'utf8').then(JSON.parse).catch(() => ({}));
+  if (minute >= bedH * 60 + bedM - 30 && reviewed.day !== dayStamp(now)) {
+    await fs.promises.mkdir(path.dirname(reviewFile), { recursive: true });
+    await fs.promises.writeFile(reviewFile, JSON.stringify({ day: dayStamp(now) }));
+    const review = await dayPlanner.review();
+    if (review?.total) {
+      await planMyDay({ tomorrow: true }).catch(() => {});
+      await notify({ title: `Today: ${review.done} of ${review.total} done`, body: `${review.doneMinutes ? `${Math.floor(review.doneMinutes / 60) ? `${Math.floor(review.doneMinutes / 60)} h ` : ''}${review.doneMinutes % 60} min of work. ` : ''}${review.left.length ? `Moved to tomorrow: ${review.left.slice(0, 4).join(', ')}.` : 'Everything got done. Nice.'} Tomorrow's plan is ready in My Day.`, kind: 'info' });
+    }
+  }
+}
+// Group study quiz on Discord.
+const { createGroupQuiz } = require('./backend/integrations/groupQuiz');
+const groupQuiz = createGroupQuiz({ dataDir, hub });
+handle('hub:group-quiz-start', async ({ quizId, channelId, seconds, count }) => {
+  const quiz = await study.getTest(quizId);
+  if (!quiz) return { ok: false, message: 'Choose a saved quiz first.' };
+  if (!/^\d{5,25}$/.test(String(channelId || ''))) return { ok: false, message: 'Choose a channel for the quiz.' };
+  const started = groupQuiz.start({ quiz, channelId: String(channelId), seconds: Math.max(10, Math.min(120, Number(seconds) || 30)), count: Number(count) || 10 });
+  if (!started.ok) return started;
+  started.done.then(result => notify({ title: 'Group quiz finished', body: result.error ? `It stopped: ${result.error}` : result.ranked.length ? `Winner: ${result.ranked[0].name} with ${result.ranked[0].points} points.` : 'Nobody answered.', kind: 'info' }));
+  return { ok: true };
+});
+handle('hub:group-quiz-stop', () => groupQuiz.stop());
+handle('hub:group-quiz-status', () => groupQuiz.status());
+handle('hub:group-leaderboard', () => groupQuiz.leaderboard());
+handle('hub:discord-text-channels', async () => {
+  const servers = await hub.run('discord.servers');
+  if (!servers.ok) return { ok: false, message: servers.message };
+  const channels = [];
+  for (const server of (servers.data || []).slice(0, 10)) { const list = await hub.run('discord.channels', { serverId: server.id }); for (const channel of list.data || []) if (channel.type === 0) channels.push({ id: channel.id, name: `${server.name} › #${channel.name}` }); }
+  return { ok: true, channels };
+});
+// Kick a Ball dashboard: the game's public numbers from Roblox, with the change since yesterday, and the suggestions inbox.
+const KICK_A_BALL_PLACE = '136637588902351';
+handle('hub:kick-a-ball', async () => {
+  const getJson = async url => { const reply = await fetch(url, { signal: AbortSignal.timeout(15000) }); if (!reply.ok) throw new Error(`Roblox answered ${reply.status}`); return reply.json(); };
+  const statsFile = path.join(dataDir, 'kick-a-ball-stats.json');
+  const history = await fs.promises.readFile(statsFile, 'utf8').then(JSON.parse).catch(() => []);
+  let game = null; let error = '';
+  try {
+    const { universeId } = await getJson(`https://apis.roblox.com/universes/v1/places/${KICK_A_BALL_PLACE}/universe`);
+    const [info, votes] = await Promise.all([getJson(`https://games.roblox.com/v1/games?universeIds=${universeId}`), getJson(`https://games.roblox.com/v1/games/votes?universeIds=${universeId}`).catch(() => ({ data: [] }))]);
+    const data = info.data?.[0] || {}; const vote = votes.data?.[0] || {};
+    if (!data.id) throw new Error('Roblox keeps the numbers hidden until it is public. Publish Kick a Ball as public and they show up here.');
+    game = { name: data.name || 'Kick a Ball', playing: data.playing || 0, visits: data.visits || 0, favorites: data.favoritedCount || 0, likes: vote.upVotes || 0, dislikes: vote.downVotes || 0, updated: data.updated || '', url: `https://www.roblox.com/games/${KICK_A_BALL_PLACE}` };
+    const today = dayStamp(new Date());
+    if (!history.length || history.at(-1).day !== today) history.push({ day: today, visits: game.visits, favorites: game.favorites, likes: game.likes });
+    else history[history.length - 1] = { day: today, visits: game.visits, favorites: game.favorites, likes: game.likes };
+    await fs.promises.writeFile(statsFile, JSON.stringify(history.slice(-90)));
+  } catch (problem) { error = /hidden until/.test(problem.message) ? problem.message : `Couldn't reach Roblox: ${problem.message}`; }
+  const yesterday = history.length > 1 ? history.at(-2) : null;
+  const inbox = await suggestionInbox.status().catch(() => ({ items: [] }));
+  return { ok: Boolean(game), error, game, change: game && yesterday ? { visits: game.visits - yesterday.visits, favorites: game.favorites - yesterday.favorites, likes: game.likes - yesterday.likes, since: yesterday.day } : null, history: history.slice(-30), suggestions: { waiting: inbox.items.filter(item => item.outcome === 'waiting').length, done: inbox.items.filter(item => /done|implemented/i.test(item.outcome)).length, latest: inbox.items.slice(0, 5).map(item => ({ title: item.title || item.name || 'Suggestion', outcome: item.outcome })) } };
+});
 
 // Research
 handle('research:run', async ({ question, requestId }) => ({ ok: true, project: await research.run({ question, onProgress: status => send('research:progress', { requestId, status }), onToken: streamTo('research:token', requestId) }) }));
@@ -1053,11 +1570,21 @@ function setupTray() {
   } catch (error) { logger.warn(`tray unavailable: ${error.message}`); }
 }
 
+// Sunday at 5 pm or later, once a week: the plan for the week ahead, as a notification.
+async function sundayPlan() {
+  if (process.env.NEXUS_TEST) return;
+  const now = new Date();
+  if (now.getDay() !== 0 || now.getHours() < 17) return;
+  const last = await coach.lastPlan();
+  if (last && Date.now() - new Date(last.madeAt).getTime() < 3 * 86400000) return;
+  const plan = await coach.weeklyPlan({ planner: await study.listPlanner().catch(() => []), cardsDue: (await study.dueCards().catch(() => [])).length, mistakes: (await listMistakes().catch(() => [])).length });
+  await notify({ title: 'Your plan for this week', body: plan.days.slice(1, 6).map(day => `${day.label.split(',')[0]}: ${day.items[0]}`).join(' · '), kind: 'info' });
+}
 // Reminders and automations are checked on a timer in the background process, so they fire on any page.
 let schedulerTimer = null;
 function startScheduler() {
   const tick = async () => {
-    try { await calendar.tick(); await automations.tick(); }
+    try { await calendar.tick(); await automations.tick(); await sundayPlan(); await dayTick().catch(error => logger.warn(`my day: ${error.message}`)); if (!process.env.NEXUS_TEST) await sendQuick().catch(() => {}); }
     catch (error) { logger.error(`scheduler: ${error.message}`); }
   };
   tick();

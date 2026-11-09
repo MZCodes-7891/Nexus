@@ -4,7 +4,8 @@
 const crypto = require('crypto');
 const { parseJson, findQuoteSource, locateQuote, sourcesInMaterial, tidyQuestion, isAboutTheDocument, coverage } = require('./study');
 
-const COUNTS = { fewer: 5, standard: 10, more: 15 };
+const COUNTS = { fewer: 5, standard: 10, more: 15, large: 25, huge: 40 };
+const MAX_QUESTIONS = 50;
 const LEVELS = {
   easy: 'Easy: check that the student knows the key facts, terms, and examples, asked plainly. Wrong choices are clearly wrong to someone who studied.',
   medium: 'Medium: check understanding, not just memory. Ask how or why something happens, compare two things the material describes, or ask which example fits an idea. Wrong choices are believable mistakes a student who skimmed would make.',
@@ -19,7 +20,7 @@ For each question:
 - A short explanation of why the right answer is right, and in one sentence each why the two most tempting wrong choices are wrong.
 - The topic it tests, in a few words.
 - A quote: one sentence copied word for word from the material that proves the answer.
-Cover different parts of the material, and never repeat an idea already asked.
+Cover different parts of the material, and never repeat an idea already asked. Mix the kinds of question: a definition or fact, a why or how, a short new situation to apply the idea to, and, where the material has numbers or formulas, a calculation worked from it.
 Return JSON: {"questions":[{"question":"...","choices":{"A":"...","B":"...","C":"...","D":"..."},"answer":"A","hint":"...","explanation":"...","topic":"...","quote":"..."}]}`;
 
 const words = text => new Set(String(text || '').toLowerCase().match(/[a-z]{4,}/g) || []);
@@ -29,43 +30,71 @@ const keyOf = question => `${question.question} ${question.choices?.[question.an
 
 function createQuizMaker({ models, tests, recordResult, addCard, listCards, getModel = () => '' }) {
   // Makes the quiz, calling onQuestion with each question as soon as it is ready. Returns the saved quiz.
-  async function make({ material, names = [], title = '', subject = '', difficulty = 'medium', size = 'standard', focus = '', standards = '', model = '', onQuestion, onStatus, signal }) {
+  async function make({ material, names = [], title = '', subject = '', difficulty = 'medium', size = 'standard', focus = '', standards = '', model = '', topicTitles = [], save = true, already = [], onQuestion, onStatus, signal }) {
     const useModel = model || getModel();
     if (!String(material || '').trim()) throw new Error('Choose some material for the quiz first.');
-    const wanted = COUNTS[size] || Math.max(3, Math.min(25, Number(size) || 10));
+    const wanted = COUNTS[size] || Math.max(1, Math.min(MAX_QUESTIONS, Number(size) || 10));
     const sources = sourcesInMaterial(material);
     const sections = splitSections(material);
     const questions = [];
     let misses = 0;
-    for (let round = 0; questions.length < wanted && round < wanted + 4 && misses < 4; round++) {
+    for (let round = 0; questions.length < wanted && round < wanted + (wanted > 15 ? 20 : 8) && misses < (wanted > 15 ? 8 : 4); round++) {
       if (signal?.aborted) break;
       onStatus?.(`Writing question ${questions.length + 1} of ${wanted}…`);
-      const ask = Math.min(2, wanted - questions.length);
+      const ask = Math.min(wanted > 15 ? 3 : 2, wanted - questions.length);
       // Each round reads one section of the material, in turn: short reading makes each round quick, and questions come from all over it.
       const part = sections[round % sections.length];
       let parsed;
       try {
-        const reply = await models.chat({ model: useModel || undefined, format: 'json', signal, maxTokens: 1400, contextLength: 8192, messages: [{ role: 'system', content: `${PROMPT(difficulty)}${standards ? `
+        const reply = await models.chat({ model: useModel || undefined, format: 'json', signal, maxTokens: ask > 2 ? 2200 : 1400, contextLength: 8192, messages: [{ role: 'system', content: `${PROMPT(difficulty)}${standards ? `
 
 ${standards}` : ''}` }, { role: 'user', content: `Write ${ask} new question${ask === 1 ? '' : 's'}.${focus ? ` Focus only on: ${String(focus).slice(0, 400)}.` : ''}${questions.length ? ` Already asked, do not repeat these ideas: ${questions.map(item => item.question).join(' | ')}` : ''}\n\nSOURCE MATERIAL:\n${part}` }] });
         parsed = parseJson(reply.content);
       } catch (error) { if (signal?.aborted) break; misses++; continue; }
       let added = 0;
-      for (const item of parsed?.questions || []) {
-        const question = checkQuestion(item, sources, questions);
-        // The passage around the proof is kept, so Explain works later without the whole document.
-        if (question) question.passage = aroundQuote(material, question.quote).slice(0, 3500);
-        if (!question || questions.length >= wanted) continue;
+      // Each question is answered again, blind, from its proof; one whose key doesn't match is dropped.
+      const checked = (await Promise.all((parsed?.questions || []).map(async item => { const question = checkQuestion(item, sources, questions); if (question) question.passage = aroundQuote(material, question.quote).slice(0, 3500); return question && await answerHolds(question, useModel, signal) ? spreadAnswer(question, questions) : null; }))).filter(Boolean);
+      for (const question of checked) {
+        // The AI writes topic names its own way; they are matched to the real topic names so results group cleanly.
+        if (question && topicTitles.length) question.topic = matchTopic(question.topic, topicTitles, question.question);
+        if (questions.length >= wanted || questions.some(other => overlap(keyOf(other), keyOf(question)) >= 0.6)) continue;
         questions.push(question);
         added++;
         onQuestion?.(question, questions.length, wanted);
       }
       misses = added ? 0 : misses + 1;
     }
+    if (!save) return { questions };
     if (!questions.length) throw new Error('The AI could not write questions it could prove from this material. Try another topic, or more material.');
     const quiz = { id: crypto.randomUUID(), kind: 'quiz', title: String(title || `${subject ? `${subject} ` : ''}quiz`).slice(0, 120), subject, difficulty, focus: String(focus || '').slice(0, 400), sources: names.slice(0, 20), questions, createdAt: new Date().toISOString(), attempts: [] };
     await tests.upsert(quiz);
     return quiz;
+  }
+
+  // The model answers the question without being told the key, from the proof sentence and the passage around it.
+  async function answerHolds(question, model, signal) {
+    try {
+      const reply = await models.chat({ model: model || undefined, signal, maxTokens: 20, contextLength: 4096, messages: [{ role: 'user', content: `Answer this multiple-choice question using only the passage. Reply with the letter only.\n\nPASSAGE:\n${(question.passage || question.quote).slice(0, 2500)}\n\nQUESTION: ${question.question}\n${['A', 'B', 'C', 'D'].map(letter => `${letter}. ${question.choices[letter]}`).join('\n')}` }] });
+      const letter = (String(reply.content || '').toUpperCase().match(/\b([ABCD])\b/) || [])[1];
+      return !letter || letter === question.answer; // no clear letter: keep it rather than lose a good question
+    } catch (error) { if (signal?.aborted) throw error; return true; }
+  }
+  // Models put the answer under A or B far too often. The choices are moved so answers spread evenly, and letters named
+  // in the explanation are moved with them.
+  function spreadAnswer(question, existing) {
+    const letters = ['A', 'B', 'C', 'D'];
+    const used = Object.fromEntries(letters.map(letter => [letter, existing.filter(item => item.answer === letter).length]));
+    const least = Math.min(...Object.values(used));
+    const targets = letters.filter(letter => used[letter] === least);
+    const target = targets[Math.floor(Math.random() * targets.length)];
+    if (target === question.answer) return question;
+    const swap = { [question.answer]: target, [target]: question.answer };
+    const choices = { ...question.choices, [target]: question.choices[question.answer], [question.answer]: question.choices[target] };
+    const relabel = text => String(text || '')
+      .replace(/(\b(?:choice|option|answer)\s+\(?)([ABCD])\b/gi, (all, lead, letter) => lead + (swap[letter.toUpperCase()] || letter))
+      .replace(/(^|[^\w(])([ABCD])(?=\)|\s+(?:is|was|would|isn|could|can|does|doesn|states|says|describes|confuses|mixes)\b)/g, (all, lead, letter) => lead + (swap[letter] || letter))
+      .replace(/\(([ABCD])\)/g, (all, letter) => `(${swap[letter] || letter})`);
+    return { ...question, choices, answer: target, explanation: relabel(question.explanation) };
   }
 
   // A question stays only if it is well formed, about the subject, new, and proven by a real sentence of the material.
@@ -80,8 +109,13 @@ ${standards}` : ''}` }, { role: 'user', content: `Write ${ask} new question${ask
     if (/\b(all|none) of the above\b/i.test(Object.values(choices).join(' '))) return null;
     if (new Set(letters.map(letter => String(choices[letter]).trim().toLowerCase())).size < 4) return null;
     if (existing.some(other => overlap(keyOf(other), `${text} ${choices[answer]}`) >= 0.6)) return null;
-    const source = findQuoteSource(item.quote, sources);
+    // The proof must be a real sentence of the material. A reworded one is matched to the closest real sentence, which
+    // then becomes the proof; notes made of short questions rarely have a sentence to copy word for word.
+    let quote = String(item.quote || '');
+    let source = findQuoteSource(quote, sources);
+    if (!source) { const near = closestSentence(quote, sources); if (near) { quote = near.sentence; source = near.source; } }
     if (!source) return null;
+    item = { ...item, quote };
     return {
       id: crypto.randomUUID(), type: 'multiple_choice', question: text,
       choices: Object.fromEntries(letters.map(letter => [letter, String(choices[letter]).trim().slice(0, 300)])), answer,
@@ -107,7 +141,8 @@ ${standards}` : ''}` }, { role: 'user', content: `Write ${ask} new question${ask
     const results = quiz.questions.map((question, index) => ({ chosen: answers?.[index] || '', correct: answers?.[index] === question.answer, topic: question.topic }));
     for (const result of results) if (result.chosen) await recordResult(result.topic, result.correct, quiz.subject);
     const byTopic = {};
-    for (const result of results) { const entry = byTopic[result.topic] ||= { topic: result.topic, right: 0, total: 0 }; entry.total++; if (result.correct) entry.right++; }
+    const groupKey = topic => String(topic || 'General').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    for (const result of results) { const entry = byTopic[groupKey(result.topic)] ||= { topic: result.topic, right: 0, total: 0 }; entry.total++; if (result.correct) entry.right++; }
     const topics = Object.values(byTopic).sort((a, b) => a.right / a.total - b.right / b.total);
     const attempt = { at: new Date().toISOString(), score: results.filter(result => result.correct).length, total: results.length, results, topics };
     await tests.patch(id, { attempts: [attempt, ...(quiz.attempts || [])].slice(0, 10) });
@@ -125,10 +160,56 @@ ${standards}` : ''}` }, { role: 'user', content: `Write ${ask} new question${ask
     return { carded, ...attempt, strong: topics.filter(item => item.right === item.total).map(item => item.topic), weak: topics.filter(item => item.right < item.total).map(item => item.topic) };
   }
 
-  return { make, explain, finish, checkQuestion };
+  // Mock unit test: questions spread over every topic of the unit, each tagged with its topic, saved as one timed test.
+  async function makeMock({ topics, count = 24, minutes = 45, title = 'Mock unit test', subject = '', names = [], standards = '', difficulty = 'hard', model = '', weights = null, kind = 'mock', extra = {}, onQuestion, onStatus, signal }) {
+    if (!topics?.length) throw new Error('Choose a unit with topics first.');
+    const total = Math.max(topics.length, Math.min(60, Math.round(Number(count) || 24)));
+    let per = topics.map((_, index) => Math.floor(total / topics.length) + (index < total % topics.length ? 1 : 0));
+    // With weights, each topic gets questions in proportion to its weight, and topics with no weight are skipped.
+    if (Array.isArray(weights) && weights.some(value => value > 0)) {
+      const sum = weights.reduce((a, b) => a + Math.max(0, b), 0);
+      per = weights.map(value => Math.floor(Math.max(0, value) / sum * total));
+      const order = weights.map((value, index) => [value, index]).sort((a, b) => b[0] - a[0]);
+      for (let left = total - per.reduce((a, b) => a + b, 0), index = 0; left > 0; left--, index++) per[order[index % order.length][1]]++;
+    }
+    const questions = [];
+    for (const [index, topic] of topics.entries()) {
+      if (signal?.aborted) break;
+      if (!per[index]) continue;
+      onStatus?.(`Writing questions on ${topic.title.slice(0, 60)} (${index + 1} of ${topics.length} topics)…`);
+      const made = await make({ material: `SOURCE: ${topic.source || names[0] || 'Unit'} — ${topic.title}
+${topic.text}`, size: per[index], difficulty, standards, model, save: false, signal,
+        onQuestion: question => { question.topic = topic.title; questions.push(question); onQuestion?.(question, questions.length, total); } }).catch(error => { if (signal?.aborted) return null; onStatus?.(`Skipped ${topic.title.slice(0, 40)}: ${error.message}`); return null; });
+      void made;
+    }
+    if (!questions.length) throw new Error('The AI could not write questions from this unit.');
+    const mock = { ...extra, id: crypto.randomUUID(), kind, title, subject, difficulty, minutes: Math.max(5, Math.min(180, Math.round(Number(minutes) || 45))), sources: names.slice(0, 20), topics: topics.map(topic => topic.title), questions, createdAt: new Date().toISOString(), attempts: [] };
+    await tests.upsert(mock);
+    return mock;
+  }
+
+  return { make, makeMock, explain, finish, checkQuestion };
 }
 
 // Sections of about 3,500 characters, cut between paragraphs, each keeping its source's name, in an order that spreads across the material.
+// The real sentence nearest to a reworded quote, if it shares most of its words.
+function closestSentence(quote, sources) {
+  const wanted = words(quote);
+  if (wanted.size < 3) return null;
+  let best = null;
+  for (const source of sources) {
+    for (const sentence of String(source.text || '').split(/(?<=[.!?])\s+|\n+/)) {
+      const clean = sentence.trim();
+      if (clean.length < 20 || clean.length > 400) continue;
+      const have = words(clean);
+      const shared = [...wanted].filter(word => have.has(word)).length;
+      const score = shared / wanted.size;
+      if (score >= 0.6 && (!best || score > best.score)) best = { score, sentence: clean, source };
+    }
+  }
+  return best;
+}
+
 function splitSections(material, size = 3500) {
   const sections = [];
   for (const block of String(material).split(/(?=^SOURCE: )/m).filter(part => part.trim())) {
@@ -145,6 +226,16 @@ function splitSections(material, size = 3500) {
   if (!sections.length) return [String(material).slice(0, size * 2)];
   // Every other section first, then the rest, so the first questions already cover the start, middle, and end.
   return [...sections.filter((_, index) => index % 2 === 0), ...sections.filter((_, index) => index % 2 === 1)];
+}
+
+// The real topic a question belongs to: the one with its code, such as 2B, or the one sharing the most words.
+function matchTopic(topic, titles, question = '') {
+  if (titles.length === 1) return titles[0];
+  const code = String(topic).match(/\b(\d{1,2}[A-Z])\b/)?.[1];
+  const byCode = code && titles.find(title => title.startsWith(code));
+  if (byCode) return byCode;
+  const best = titles.map(title => ({ title, score: overlap(title, `${topic} ${question}`) })).sort((a, b) => b.score - a.score)[0];
+  return best && best.score > 0.05 ? best.title : titles[0];
 }
 
 // Starts the material at a different point each round, keeping whole sources together.

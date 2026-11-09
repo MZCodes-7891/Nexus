@@ -32,6 +32,8 @@ function createAutoMemory({ models, memory, getSettings, logger }) {
     for (const item of (Array.isArray(found) ? found : []).slice(0, MAX_NEW)) {
       const fact = String(item?.fact || item || '').trim().slice(0, 300);
       if (!/^the user\b/i.test(fact) || fact.split(/\s+/).length < 4) continue;
+      // A description of this one request ("The user wants to post…", "The user's message was about…") is not a lasting fact.
+      if (/^the user(?:'s message| (?:wants|wanted|asked|is asking|would like|requested|needs to|told nexus|said to|is requesting)\b)/i.test(fact) && !/\b(always|usually|every|prefers?|likes?|loves?|hates?|favou?rite|birthday|allergic|lives|goes to|is in grade|studies|plays)\b/i.test(fact)) continue;
       // A near copy of something already saved adds nothing, unless it is meant to replace it.
       const replaces = Number(item?.replaces) >= 1 ? existing[Number(item.replaces) - 1] : null;
       if (!replaces && [...existing, ...saved.map(entry => ({ text: entry }))].some(entry => overlap(entry.text, fact) >= 0.8)) continue;

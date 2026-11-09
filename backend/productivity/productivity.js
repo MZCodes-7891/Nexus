@@ -61,7 +61,7 @@ function createTasks({ dataDir }) {
     const title = String(input?.title || input?.text || '').trim().slice(0, 180);
     if (!title) throw new Error('A task needs a title.');
     const status = STATUSES.includes(input.status) ? input.status : 'todo';
-    const task = { id: crypto.randomUUID(), text: title, description: String(input.description || '').slice(0, 2000), category: String(input.category || '').slice(0, 40), status, done: status === 'complete', priority: PRIORITIES.includes(String(input.priority).toLowerCase()) ? String(input.priority).toLowerCase() : 'medium', dueDate: resolveDue(input.dueDate), projectId: String(input.projectId || project.projectId || '').slice(0, 100), projectTitle: String(input.projectTitle || project.projectTitle || 'General').slice(0, 80), createdAt: new Date().toISOString() };
+    const task = { id: crypto.randomUUID(), text: title, description: String(input.description || '').slice(0, 2000), category: String(input.category || '').slice(0, 40), status, done: status === 'complete', priority: PRIORITIES.includes(String(input.priority).toLowerCase()) ? String(input.priority).toLowerCase() : 'medium', dueDate: resolveDue(input.dueDate), projectId: String(input.projectId || project.projectId || '').slice(0, 100), projectTitle: String(input.projectTitle || project.projectTitle || 'General').slice(0, 80), createdAt: new Date().toISOString() , ...(input.minutes ? { minutes: Math.max(5, Math.min(480, Math.round(Number(input.minutes)))) } : {}) };
     await store.write([task, ...await list()]);
     return task;
   }
@@ -75,6 +75,7 @@ function createTasks({ dataDir }) {
     if (input.description !== undefined) task.description = String(input.description).slice(0, 2000);
     if (input.category !== undefined) task.category = String(input.category).slice(0, 40);
     if (input.dueDate !== undefined) task.dueDate = resolveDue(input.dueDate);
+    if (input.minutes !== undefined) task.minutes = Math.max(5, Math.min(480, Math.round(Number(input.minutes) || 30)));
     if (PRIORITIES.includes(String(input.priority).toLowerCase())) task.priority = String(input.priority).toLowerCase();
     await store.write(tasks);
     return task;

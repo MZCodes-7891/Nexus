@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Pictures: made by a free online service, and looked at by a local vision model in Ollama, so photos the person sends never leave the PC.
-const VISION_MODEL = 'qwen2.5vl:3b';
+const VISION_MODEL = 'gemma3:12b';
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp' };
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const isImagePath = file => Boolean(IMAGE_TYPES[path.extname(String(file || '')).toLowerCase()]);
@@ -26,6 +26,9 @@ function createImages({ models, getSettings, outDir, fetchFn = (...args) => fetc
     if (!list.length) throw new Error('No picture was given.');
     const model = visionModel();
     const descriptions = [];
+    // The main and vision models together are bigger than a 12 GB card; Ollama then spills into RAM and the PC runs
+    // out of memory instead of failing. The main model is unloaded first, and comes back on its next question.
+    if (models.freeMemory) await models.freeMemory(model).catch(() => {});
     for (const image of list) {
       // The vision model unloads soon after, so the main model gets its memory back.
       const ask = () => models.chat({ model, messages: [{ role: 'system', content: VISION_PROMPT }, { role: 'user', content: `User's message: ${String(question || 'What is in this picture?').slice(0, 1000)}`, images: [image] }], signal, maxTokens: 700, contextLength: 4096, keepAlive: '2m' });

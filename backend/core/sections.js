@@ -33,12 +33,14 @@ const privateIds = dir => listSections(dir).filter(section => !section.public).m
 
 function createSections({ dir, sourceDir, handle, context, logger }) {
   const loaded = [];
+  const hooks = [];
   for (const section of listSections(dir)) {
     if (section.backend) {
       try {
         // Each section's handlers are named section:<id>:<name>, so sections can't clash with the app or each other.
         const scopedHandle = (name, handler) => handle(`section:${section.id}:${name}`, handler);
-        require(path.join(dir, section.id, 'backend.js'))({ ...context, handle: scopedHandle, folder: path.join(context.dataDir, 'sections', section.id) });
+        const api = require(path.join(dir, section.id, 'backend.js'))({ ...context, handle: scopedHandle, folder: path.join(context.dataDir, 'sections', section.id) });
+        if (api && (api.briefing || api.whatNow || api.dayBlocks)) hooks.push(api);
       } catch (error) { logger?.warn(`section ${section.id} could not load: ${error.message}`); continue; }
     }
     loaded.push(section);
@@ -57,7 +59,8 @@ function createSections({ dir, sourceDir, handle, context, logger }) {
     if (entry) entry.public = Boolean(value);
     return { ok: true, message: value ? 'Public: it goes to GitHub and into the release with the next update.' : 'Private: it stays on your PC and out of GitHub and the release.' };
   }
-  return { list: () => ({ sections: loaded, editable }), setPublic };
+  const collect = async (name, ...args) => (await Promise.all(hooks.filter(api => api[name]).map(api => api[name](...args).catch(() => [])))).flat();
+  return { list: () => ({ sections: loaded, editable }), setPublic, briefing: () => collect('briefing'), whatNow: () => collect('whatNow'), dayBlocks: date => collect('dayBlocks', date) };
 }
 
 module.exports = { createSections, listSections, privateIds };

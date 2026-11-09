@@ -7,7 +7,18 @@ const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
 const INSTALLER_URL = 'https://ollama.com/download/OllamaSetup.exe';
-const RECOMMENDED_MODEL = 'qwen2.5:latest';
+const RECOMMENDED_MODEL = 'qwen3:14b';
+// The biggest model that fits the graphics card, with room left for the screen; a model too big for the card spills into
+// RAM and becomes slow. Each choice comes with a vision model that fits beside it.
+const MODEL_TIERS = [
+  { minMB: 11000, model: 'qwen3:14b', vision: 'gemma3:12b', size: 'about a 9 GB download' },
+  { minMB: 7000, model: 'qwen3:8b', vision: 'qwen2.5vl:7b', size: 'about a 5 GB download' },
+  { minMB: 0, model: 'qwen2.5:7b', vision: 'qwen2.5vl:3b', size: 'about a 4.7 GB download' }
+];
+function graphicsMemoryMB() {
+  return new Promise(resolve => execFile('nvidia-smi', ['--query-gpu=memory.total', '--format=csv,noheader,nounits'], { windowsHide: true, timeout: 8000 }, (error, stdout) => resolve(error ? 0 : Math.max(0, ...String(stdout).split(/\s+/).map(Number).filter(Number.isFinite)))));
+}
+const tierFor = megabytes => MODEL_TIERS.find(tier => megabytes >= tier.minMB);
 const GB = 1024 ** 3;
 
 // Only an installer really signed by Ollama is ever run.
@@ -27,6 +38,8 @@ async function freeSpace(folder) {
 // First-run setup: everything a command line would otherwise be needed for.
 function createSetup({ models, getSettings, updateSettings, send, env = process.env }) {
   let activeDownload = null;
+  let tier = null;
+  const recommended = async () => (tier ||= tierFor(Number(env.NEXUS_GPU_MB) || await graphicsMemoryMB()));
   const base = () => String(getSettings().ai.baseUrl).replace(/\/+$/, '');
   const ollamaExe = () => path.join(env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe');
   const progress = (step, data) => send('setup:progress', { step, ...data });
@@ -43,7 +56,8 @@ function createSetup({ models, getSettings, updateSettings, send, env = process.
       ready: Boolean(ai.ready),
       engineProblem: Boolean(ai.ok && ai.installed && !ai.ready),
       message: ai.message,
-      recommendedModel: RECOMMENDED_MODEL,
+      recommendedModel: (await recommended()).model,
+      recommendedSize: (await recommended()).size,
       setupDone: getSettings().general.setupDone
     };
   }
@@ -92,9 +106,10 @@ function createSetup({ models, getSettings, updateSettings, send, env = process.
       await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
     }
   }
-  async function pullModel(name = RECOMMENDED_MODEL) {
+  async function pullModel(name) {
     if (activeDownload) throw new Error('A download is already running.');
-    const modelName = String(name || RECOMMENDED_MODEL).trim().slice(0, 100);
+    const choice = await recommended();
+    const modelName = String(name || choice.model).trim().slice(0, 100);
     if (!/^[\w.:/-]+$/.test(modelName)) throw new Error('That is not a valid model name.');
     activeDownload = new AbortController();
     try {
@@ -116,7 +131,9 @@ function createSetup({ models, getSettings, updateSettings, send, env = process.
         }
       }
       if (!finished) throw new Error('The download ended early. Try again; it picks up where it stopped.');
-      await updateSettings({ ai: { model: modelName } });
+      // Pictures use the vision model that fits beside this one; it downloads the first time a picture is sent.
+      const paired = MODEL_TIERS.find(item => item.model === modelName);
+      await updateSettings({ ai: { model: modelName, ...(paired ? { visionModel: paired.vision } : {}) } });
       return { ok: true, model: modelName, message: `${modelName} is ready.` };
     } catch (error) {
       if (error.name === 'AbortError') return { ok: false, canceled: true, message: 'Canceled. Starting again picks up where it stopped.' };
@@ -126,4 +143,4 @@ function createSetup({ models, getSettings, updateSettings, send, env = process.
   return { status, installOllama, pullModel, cancel() { activeDownload?.abort(); return { ok: true }; }, finish: name => updateSettings({ general: { setupDone: true, ...(name !== undefined ? { userName: String(name).trim().slice(0, 60) } : {}) } }) };
 }
 
-module.exports = { createSetup, verifySignature, RECOMMENDED_MODEL };
+module.exports = { createSetup, verifySignature, RECOMMENDED_MODEL, MODEL_TIERS, tierFor };

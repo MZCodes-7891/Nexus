@@ -58,6 +58,10 @@ async function renderHome() {
     const accounts = await ipcRenderer.invoke('composio:catalog').catch(() => ({ ok: false, accounts: [] }));
     const activeAccounts = (accounts.accounts || []).filter(account => account.status === 'ACTIVE');
     grid.replaceChildren(
+        myDayCard(),
+        whatNowCard(),
+        focusMusicCard(),
+        kickABallCard(),
         homeCard('Suggested for you', (data.suggestions || []).map(item => linkLine(item.text, () => openSuggestion(item.action))), 'Suggestions appear as you add tasks, files, and study sets. They stay on this computer.'),
         weatherCard(),
         newsCard(),

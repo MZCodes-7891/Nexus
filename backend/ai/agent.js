@@ -70,6 +70,9 @@ async function runAgent({ models, registry, permissions, logger, settings, messa
   const shorten = text => { const full = String(text || ''); return full.length <= 6000 ? full : `${full.slice(0, 3600)}\n[Middle of this message omitted to fit the model.]\n${full.slice(-2400)}`; };
   const conversation = messages.filter(message => ['user', 'assistant'].includes(message.role)).map(message => ({ role: message.role, content: shorten(message.content) }));
   let answer = '';
+  // Kept from the last turn so the empty-reply retry below can reuse them.
+  let budget = 4000; let system = null;
+  const failures = new Map();
   let nudged = false;
   const completedCalls = new Set();
 
@@ -86,8 +89,8 @@ async function runAgent({ models, registry, permissions, logger, settings, messa
     const localTools = registry.select(lastUser, { max: 13, recent: used }).filter(tool => tool.name !== plannerTool.name && !(dynamic.length && tool.shadowedBy?.some(name => named.includes(name))));
     const offered = toolMode === 'off' ? [] : [plannerTool, ...localTools, ...dynamic.slice(0, 8)];
     const prompt = systemPrompt({ now: new Date(), language: settings.general.language, memoryText, projectTitle: workProject?.projectTitle, userName: settings.general.userName, hasTools: offered.length > 0 });
-    const system = { role: 'system', content: toolMode === 'json' ? prompt + textToolInstructions(offered) : prompt };
-    const budget = Math.max(4000, Math.floor(ai.contextLength * 2.6) - JSON.stringify(offered.map(toSchema)).length);
+    system = { role: 'system', content: toolMode === 'json' ? prompt + textToolInstructions(offered) : prompt };
+    budget = Math.max(4000, Math.floor(ai.contextLength * 2.6) - JSON.stringify(offered.map(toSchema)).length);
 
     // Tool calls printed as text must not flash up as the answer, so anything that looks like one is held back.
     let streamed = '';
@@ -153,6 +156,7 @@ async function runAgent({ models, registry, permissions, logger, settings, messa
       try {
         const callKey = `${call.name}|${JSON.stringify(call.args ?? {})}`;
         if (!tool) toolResult = { ok: false, error: `No tool named ${call.name} exists.` };
+        else if ((failures.get(call.name)?.count || 0) >= 2) toolResult = { ok: false, blocked: true, error: `Stop calling ${call.name}: it failed twice with "${failures.get(call.name).reason}". Tell the user exactly that reason and what they can do about it.` };
         // Small models can loop on the same call; the result they already have is what they need.
         else if (completedCalls.has(callKey) || (/SEARCH_TOOLS/.test(call.name) && actions.some(action => action.tool === call.name && action.ok))) toolResult = { ok: false, error: 'You already have this result. Use it to take the next step, or answer the user now.' };
         else {
@@ -180,6 +184,7 @@ async function runAgent({ models, registry, permissions, logger, settings, messa
       }
       const ok = toolResult?.ok !== false && !toolResult?.error && !toolResult?.cancelled;
       if (ok) completedCalls.add(`${call.name}|${JSON.stringify(call.args ?? {})}`);
+      else if (!toolResult?.cancelled && !toolResult?.blocked) { const reason = String(toolResult?.error || toolResult?.message || 'it failed').slice(0, 200); const seen = failures.get(call.name); failures.set(call.name, { reason, count: seen && seen.reason === reason ? seen.count + 1 : 1 }); }
       const action = { id: actionId, tool: call.name, args: safeArgs, ok, cancelled: Boolean(toolResult?.cancelled), summary: summarizeResult(toolResult), ms: Date.now() - started };
       actions.push(action);
       if (!used.includes(call.name)) used.push(call.name);
@@ -204,7 +209,17 @@ async function runAgent({ models, registry, permissions, logger, settings, messa
     answer += note;
     emit({ type: 'token', text: note });
   }
-  return { runId, answer: answer || 'The model returned an empty reply. Try a shorter message or check that Ollama has enough memory.', plan, actions, toolMode };
+  // The model now and then returns nothing at all. One more try, with no tools offered and the tool results written out
+  // as plain text, almost always gets a real answer.
+  if (!String(answer || '').trim() && !signal?.aborted) {
+    try {
+      if (!system) throw new Error('no turn ran');
+      const plain = trimHistory(conversation, budget).filter(message => message.role !== 'tool' || message.content).map(message => (message.role === 'tool' ? { role: 'user', content: `Result of ${message.name}: ${String(message.content).slice(0, 3000)}` } : { role: message.role, content: String(message.content || '') })).filter(message => message.content.trim());
+      const retry = await models.chat({ messages: [system, ...plain, { role: 'user', content: 'Answer my last message now in plain words, using any results above. Do not call tools.' }], signal, onToken: text => emit({ type: 'token', text }) });
+      answer = String(retry.content || '').trim();
+    } catch (error) { logger?.warn(`empty reply retry failed: ${error.message}`); }
+  }
+  return { runId, answer: answer || 'The AI returned an empty reply twice. Try asking again in a moment.', plan, actions, toolMode };
 }
 
 module.exports = { DOING_REQUEST, HOW_TO_REPLY, runAgent, planTool, systemPrompt, trimHistory, CLAIM_PATTERN };

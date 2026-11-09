@@ -184,9 +184,9 @@ async function renderD2LPracticeTab() {
         } catch (error) { status.textContent = ''; throw error; }
     }));
     const instructions = instructionsBox('d2l');
-    const save = h('button', { type: 'button', class: 'integration-button secondary', text: "Save the course I'm viewing" });
+    const save = h('button', { type: 'button', class: 'integration-button secondary', text: school.background ? 'Get the latest from D2L' : "Save the course I'm viewing" });
     save.addEventListener('click', busyButton(save, 'Reading course…', async () => {
-        status.textContent = 'Reading the open D2L course and its files…';
+        status.textContent = school.background ? 'Reading your D2L courses in the background. This takes a few minutes; nothing opens on screen.' : 'Reading the open D2L course and its files…';
         const result = await ipcRenderer.invoke('school:read-content', { subject: subject.value });
         status.textContent = result.message; status.dataset.kind = result.ok ? 'ok' : 'error';
         await refresh();
@@ -381,28 +381,46 @@ function openStudyTab(tab, options = {}) {
     studyTabSelect(tab, options);
 }
 function bindStudy() {
-    const PANELS = { quizzes: 'Quizzes', sets: 'Study sets', d2l: 'D2L Practice', assignments: 'Assignments', library: 'Library', guides: 'Study guides', flashcards: 'Flashcards', tests: 'Practice tests', writing: 'My writing', quiz: 'Quiz', planner: 'Planner', progress: 'Progress' };
+    // Six sections, each with its own tabs. Coach tools share one panel and show by section.
+    const GROUPS = [
+        ['today', '🏠 Today', [['overview', 'Overview']]],
+        ['practise', '📚 Practise', [['quizzes', 'Quizzes'], ['mistakes', 'Mistakes'], ['flashcards', 'Flashcards'], ['sets', 'Study sets'], ['tests', 'Practice tests'], ['d2l', 'D2L practice'], ['group', 'Group quiz']]],
+        ['tests', '🎯 Tests & teacher', [['teacher', 'Teacher Mode'], ['exams', 'Exams & predicted mark']]],
+        ['work', '📝 Assignments', [['assignments', 'Due work'], ['guide', 'Assignment guide'], ['writing', 'My writing']]],
+        ['learn', '🧠 Learn', [['library', 'Library'], ['guides', 'Study guides'], ['explain', 'Teach-back & vocabulary']]],
+        ['progress', '📈 Progress', [['progress', 'Progress'], ['grades', 'Grades & study time'], ['planner', 'Planner']]]
+    ];
+    const COACH = new Set(['overview', 'group', 'teacher', 'exams', 'guide', 'explain', 'grades']);
+    const ALIASES = { coach: 'overview' };
+    const groupOf = id => GROUPS.find(([, , items]) => items.some(([item]) => item === id)) || GROUPS.find(([key]) => key === 'practise');
+    const renderers = { quizzes: () => renderQuizzesTab(), mistakes: () => renderMistakesTab(), sets: options => renderSetsTab(options.id), d2l: () => renderD2LPracticeTab(), assignments: () => renderAssignmentsTab(), guides: options => renderGuidesTab(options.id), flashcards: () => renderFlashcardsTab(), tests: () => renderTestsTab(), writing: () => renderWritingTab(), quiz: options => renderQuizTab(options), planner: () => renderPlannerTab(), progress: () => renderProgressTab() };
+    let currentGroup = '';
     let tabOptions = {};
-    const select = tabs('study-tabs', Object.entries(PANELS), async id => {
-        for (const key of Object.keys(PANELS)) document.getElementById(`study-tab-${key}`).classList.toggle('hidden', key !== id);
+    const show = async id => {
+        const panelId = COACH.has(id) ? 'coach' : id;
+        document.querySelectorAll('#view-school .tab-panel').forEach(panel => panel.classList.toggle('hidden', panel.id !== 'study-tab-' + panelId));
         const options = tabOptions; tabOptions = {};
-        try {
-            if (id === 'quizzes') await renderQuizzesTab();
-            if (id === 'sets') await renderSetsTab(options.id);
-            if (id === 'd2l') await renderD2LPracticeTab();
-            if (id === 'assignments') await renderAssignmentsTab();
-            if (id === 'guides') await renderGuidesTab(options.id);
-            if (id === 'flashcards') await renderFlashcardsTab();
-            if (id === 'tests') await renderTestsTab();
-            if (id === 'writing') await renderWritingTab();
-            if (id === 'quiz') await renderQuizTab(options);
-            if (id === 'planner') await renderPlannerTab();
-            if (id === 'progress') await renderProgressTab();
-        } catch (error) { toast(error.message, 'error'); }
-    });
+        try { if (COACH.has(id)) await renderCoachTab(id); else await renderers[id]?.(options); } catch (error) { toast(error.message, 'error'); }
+    };
+    let selectTab = null;
+    const selectGroup = (key, tabId) => {
+        const group = GROUPS.find(([name]) => name === key);
+        currentGroup = key;
+        document.querySelectorAll('#study-groups .study-group').forEach(button => button.classList.toggle('active', button.dataset.group === key));
+        document.getElementById('study-tabs').classList.toggle('hidden', group[2].length < 2);
+        selectTab = tabs('study-tabs', group[2], show);
+        selectTab(tabId && group[2].some(([item]) => item === tabId) ? tabId : group[2][0][0]);
+    };
+    document.getElementById('study-groups').replaceChildren(...GROUPS.map(([key, label]) => h('button', { type: 'button', class: 'study-group', dataset: { group: key }, text: label, onclick: () => selectGroup(key) })));
+    const select = rawId => {
+        const id = ALIASES[rawId] || rawId;
+        if (id === 'quiz') { show('quiz'); return; }
+        const [key] = groupOf(id);
+        if (key !== currentGroup) selectGroup(key, id); else selectTab(id);
+    };
     studyTabSelect = (id, options) => { tabOptions = options || {}; select(id); };
-    select('library');
-    PAGE_HOOKS.studyOpenDefault = () => select('sets');
+    select('overview');
+    PAGE_HOOKS.studyOpenDefault = () => select('overview');
     document.getElementById('d2l-list-courses').addEventListener('click', async () => {
         const box = document.getElementById('d2l-courses');
         box.replaceChildren(h('p', { class: 'muted small', text: 'Asking D2L…' }));

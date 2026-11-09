@@ -1,5 +1,10 @@
 // Shared page helpers. Everything is built with text nodes, so model and web output can never become markup.
 const bridge = window.nexusBridge;
+// An empty part (null, undefined, or false) is left out, instead of showing up as the word "null" on the page.
+for (const method of ['replaceChildren', 'append', 'prepend']) {
+    const original = Element.prototype[method];
+    Element.prototype[method] = function (...children) { return original.apply(this, children.filter(child => child !== null && child !== undefined && child !== false)); };
+}
 const listenerRegistry = new Map();
 const ipcRenderer = {
     invoke: (channel, ...args) => bridge.invoke(channel, ...args),

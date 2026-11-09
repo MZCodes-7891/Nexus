@@ -66,8 +66,13 @@ function checkedD2LUrl(value) {
   url.hash = ''; url.search = '';
   return url.href.replace(/\/$/, '');
 }
-  async function getD2LBrowser() {
-    if (d2lBrowserContext && d2lBrowserPage && !d2lBrowserPage.isClosed()) return d2lBrowserPage;
+  let hiddenRun = false;
+  async function getD2LBrowser({ hidden = false } = {}) {
+    if (d2lBrowserContext && d2lBrowserPage && !d2lBrowserPage.isClosed()) {
+      // A hidden check may be running when the person asks to see D2L: it is closed and D2L opens in a window instead.
+      if (!hidden && hiddenRun) { await d2lBrowserContext.close().catch(() => {}); d2lBrowserContext = null; d2lBrowserPage = null; hiddenRun = false; }
+      else return d2lBrowserPage;
+    }
     const { chromium } = require('playwright-core');
     const browsers = getBrowserExecutables();
     if (!browsers.length) throw new Error('No supported browser was found. Install Chrome, Edge, Opera GX, or Brave.');
@@ -76,13 +81,14 @@ function checkedD2LUrl(value) {
       try {
         // An existing D2L sign-in in Opera GX keeps working; other browsers get their own profile folder.
         d2lBrowserContext = await chromium.launchPersistentContext(path.join(dataDir, `NexusD2LProfile${/opera/i.test(exe) ? '' : `-${path.basename(exe, '.exe')}`}`), {
-          executablePath: exe, headless: Boolean(process.env.NEXUS_TEST), timeout: 40000, acceptDownloads: true, viewport: { width: 1365, height: 900 },
+          executablePath: exe, headless: hidden || Boolean(process.env.NEXUS_TEST), timeout: 40000, acceptDownloads: true, viewport: { width: 1365, height: 900 },
           args: ['--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync']
         });
         break;
       } catch (error) { lastError = error; }
     }
     if (!d2lBrowserContext) throw new Error(`The D2L window could not be started: ${String(lastError?.message || '').split('\n')[0].slice(0, 200)}`);
+    hiddenRun = hidden;
     d2lBrowserContext.on('page', page => { d2lBrowserPage = page; });
     d2lBrowserPage = d2lBrowserContext.pages()[0] || await d2lBrowserContext.newPage();
     d2lBrowserContext.on('close', () => { d2lBrowserContext = null; d2lBrowserPage = null; });
@@ -90,6 +96,9 @@ function checkedD2LUrl(value) {
   }
 ipcMain.handle('school:status', async () => {
   const settings = await readD2LSettings();
+  const background = await fs.promises.readFile(path.join(dataDir, 'd2l-background.json'), 'utf8').then(JSON.parse).catch(() => ({}));
+  if (settings.url && background.ok && !background.signInNeeded && !(d2lBrowserPage && !d2lBrowserPage.isClosed() && !hiddenRun)) return { ok: true, configured: true, url: settings.url, signedIn: true, background: true, lastCheck: background.lastCheck, message: `NEXUS is signed in to D2L by itself, in the background (last checked ${new Date(background.lastCheck).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}). You don't need to open it.` };
+  if (settings.url && background.signInNeeded) return { ok: true, configured: true, url: settings.url, signedIn: false, message: 'D2L signed you out. Press "Open D2L sign-in" and sign in once; NEXUS keeps you signed in after that.' };
   const currentUrl = d2lBrowserPage && !d2lBrowserPage.isClosed() ? d2lBrowserPage.url() : '';
   let signedIn = false;
   try { signedIn = Boolean(settings.url && currentUrl && new URL(currentUrl).hostname === new URL(settings.url).hostname); } catch {}
@@ -240,7 +249,12 @@ ipcHandlers.read = async (options = {}) => {
     return { ok: true, text, items: libraryItems.map(({ id, title, kind, url, truncated }) => ({ id, title, kind, url, truncated })), pageCount: libraryItems.length, skipped, currentUrl: startingUrl, message: `Added ${libraryItems.length} course page/file item(s) to your study library. ${skipped ? `${skipped} item(s) were skipped or exceeded limits.` : ''}` };
   } catch (error) { return { ok: false, message: String(error.message || error).slice(0, 700) }; }
   };
-  ipcMain.handle('school:read-content', (_event, options = {}) => ipcHandlers.read(options));
+  ipcMain.handle('school:read-content', async (_event, options = {}) => {
+    if (d2lBrowserPage && !d2lBrowserPage.isClosed() && !hiddenRun && !/\/d2l\/home\/?$/i.test(new URL(d2lBrowserPage.url()).pathname)) return ipcHandlers.read(options);
+    const result = await withD2L(() => scanAllCourses(guessSubject));
+    if (!result.ok) return { ok: false, message: signInMessage(result) };
+    return { ok: true, pageCount: result.added, message: result.scanned ? `Read ${result.scanned} course${result.scanned === 1 ? '' : 's'} from D2L in the background: ${result.added} pages and files saved.` : 'NEXUS got into D2L but found no courses with readable content.' };
+  });
   ipcMain.handle('school:library:list', async () => (await readD2LLibrary()).map(item => ({
   id: item.id, title: item.title, kind: item.kind, url: item.url, provider: item.provider || 'd2l', subject: item.subject || '', course: item.course || courseNameFrom(item.title), updatedAt: item.updatedAt, truncated: item.truncated,
   objectives: item.objectives?.length ? item.objectives : detectD2LObjectives(item.title, item.text)
@@ -348,10 +362,73 @@ ipcMain.handle('study:library:add-local', async (_event, payload = {}) => {
     const library = await readD2LLibrary();
     return library.filter(item => !subject || !item.subject || item.subject.toLowerCase() === String(subject).toLowerCase()).map(item => { const haystack = `${item.title} ${item.text}`.toLowerCase(); return { item, hits: words.filter(word => haystack.includes(word)).length, titleHits: words.filter(word => item.title.toLowerCase().includes(word)).length }; }).filter(entry => !words.length || entry.hits).sort((a, b) => b.titleHits - a.titleHits || b.hits - a.hits).map(entry => entry.item);
   }
-  ipcMain.handle('school:courses', async () => listCourses());
+  // Grades from Brightspace, for every active course.
+  async function listGrades() {
+    const courses = await listCourses();
+    if (!courses.ok) return courses;
+    const grades = [];
+    for (const course of courses.courses.filter(item => item.active)) {
+      const result = await d2lBrowserPage.evaluate(async ou => {
+        const headers = { 'X-Csrf-Token': localStorage.getItem('XSRF.Token') || '' };
+        const versions = await (await fetch('/d2l/api/versions/', { headers })).json();
+        const le = versions.find(item => item.ProductCode === 'le');
+        const response = await fetch(`/d2l/api/le/${le.LatestVersion}/${ou}/grades/values/myGradeValues/`, { headers });
+        if (!response.ok) return { error: `HTTP ${response.status}` };
+        return { items: await response.json() };
+      }, course.id).catch(error => ({ error: error.message }));
+      for (const item of result.items || []) {
+        if (!(Number(item.PointsDenominator) > 0) || item.PointsNumerator === null || item.PointsNumerator === undefined) continue;
+        grades.push({ id: `${course.id}-${item.GradeObjectIdentifier}`, course: course.name, title: String(item.GradeObjectName || 'Grade').slice(0, 140), score: Number(item.PointsNumerator), outOf: Number(item.PointsDenominator), date: item.LastModified || '' });
+      }
+    }
+    return { ok: true, grades };
+  }
+  // The background check: D2L opens hidden, with the sign-in saved in NEXUS's D2L profile, so nothing appears on screen.
+  // If D2L wants the person to sign in again, the check stops and says so. NEXUS never types a password.
+  let checkDepth = 0;
+  async function backgroundCheck(work) {
+    if (checkDepth > 0) return { ok: true, ...(await work()) };
+    checkDepth++;
+    try { return await backgroundCheckOnce(work); } finally { checkDepth--; }
+  }
+  async function backgroundCheckOnce(work) {
+    const { url: schoolUrl } = await readD2LSettings();
+    if (!schoolUrl) return { ok: false, notSetUp: true, message: 'The D2L address is not set.' };
+    const visible = Boolean(d2lBrowserPage && !d2lBrowserPage.isClosed() && !hiddenRun);
+    let page;
+    try {
+      page = visible ? d2lBrowserPage : await getD2LBrowser({ hidden: true });
+      if (!visible) { page = await gotoWithRetry(page, `${schoolUrl}/d2l/home`, { waitUntil: 'domcontentloaded', timeout: 60000 }); d2lBrowserPage = page; await page.waitForTimeout(2500); }
+      const here = new URL(page.url());
+      const signedIn = here.hostname === new URL(schoolUrl).hostname && !/\/(?:login|signin)/i.test(here.pathname) && !(await page.locator('input[type="password"]').count().catch(() => 0));
+      if (!signedIn) return { ok: false, signIn: true, message: 'D2L needs you to sign in again.' };
+      return { ok: true, ...(await work()) };
+    } catch (error) { return { ok: false, message: String(error.message || error).slice(0, 300) }; }
+    finally { if (!visible && hiddenRun && d2lBrowserContext) { await d2lBrowserContext.close().catch(() => {}); d2lBrowserContext = null; d2lBrowserPage = null; hiddenRun = false; } }
+  }
+  // Every active course's Content page, read into the study library, as if the person had opened each one.
+  async function scanAllCourses(subjectOf) {
+    const courses = await listCourses();
+    if (!courses.ok) return { scanned: 0, added: 0, items: [] };
+    const { url: schoolUrl } = await readD2LSettings();
+    let scanned = 0; let added = 0; const items = [];
+    for (const course of courses.courses.filter(item => item.active).slice(0, 10)) {
+      try {
+        await d2lBrowserPage.goto(`${schoolUrl}/d2l/le/content/${course.id}/Home`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const result = await ipcHandlers.read({ subject: subjectOf(course.name) });
+        if (result.ok) { scanned++; added += result.pageCount || 0; items.push(...result.items.map(item => ({ ...item, course: course.name }))); }
+      } catch {}
+    }
+    return { scanned, added, items };
+  }
+  // Anything that needs D2L uses the open D2L window if there is one, or else the hidden one with the saved sign-in.
+  const withD2L = work => backgroundCheck(work);
+  const guessSubject = name => (/science|bio|chem|phys/i.test(name) ? 'Science' : /math/i.test(name) ? 'Math' : /social|history|geo/i.test(name) ? 'Social Studies' : /english|ela|language arts/i.test(name) ? 'English' : 'Science');
+  const signInMessage = result => (result.signIn ? 'D2L signed you out. Press "Open D2L sign-in" once and sign in; after that NEXUS gets in by itself again.' : result.message);
+  ipcMain.handle('school:courses', async () => { const result = await withD2L(() => listCourses()); return result.ok ? result : { ...result, ok: false, error: signInMessage(result) }; });
   ipcMain.handle('school:open-course', async (_event, id) => { try { return await openCourse(id); } catch (error) { return { ok: false, message: String(error.message).slice(0, 400) }; } });
   return {
-    readD2LSettings, readD2LLibrary, readLibraryForTopic, listCourses, listAssignments, openCourse,
+    readD2LSettings, readD2LLibrary, readLibraryForTopic, listCourses, listAssignments, listGrades, backgroundCheck, withD2L, scanAllCourses, openCourse,
     open: () => ipcHandlers.open(), readOpenCourse: subject => ipcHandlers.read({ subject }),
     async closeBrowser() { if (d2lBrowserContext) await d2lBrowserContext.close().catch(() => {}); }
   };

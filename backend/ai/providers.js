@@ -60,6 +60,8 @@ const ollama = {
     if (keepAlive !== undefined) body.keep_alive = keepAlive;
     if (tools?.length) body.tools = tools;
     if (format) body.format = format;
+    // Thinking models (Qwen3 and similar) answer directly; thinking first makes every reply much slower.
+    if (/qwen3|deepseek-r1|magistral/i.test(config.model)) body.think = false;
     const response = await expectOk(await fetch(`${this.base(config)}/api/chat`, { method: 'POST', body: JSON.stringify(body), signal }), 'Ollama');
     let content = '';
     const toolCalls = [];
@@ -70,7 +72,7 @@ const ollama = {
       if (text) { content += text; onToken?.(text); }
       for (const call of part.message?.tool_calls || []) toolCalls.push({ id: `call_${toolCalls.length}`, name: String(call.function?.name || ''), args: parseArgs(call.function?.arguments) });
     });
-    return { content, toolCalls };
+    return { content: content.replace(/<think>[\s\S]*?<\/think>\s*/g, ''), toolCalls };
   },
   // Listing models only proves the server is up. Loading one proves it can answer; a damaged install passes the first and fails the second.
   async proveLoads(config) {

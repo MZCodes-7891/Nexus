@@ -63,7 +63,7 @@ const ABOUT_THE_DOCUMENT = new RegExp([
   '\\bpurpose of (?:the|this) (?:document|pdf|file|page|section|module|reading|worksheet|handout)\\b'
 ].join('|'), 'i');
 // Questions read better, and stand on their own, without pointing back at a passage.
-function tidyQuestion(text) { return String(text || '').replace(/^\s*(?:According to|Based on) (?:the )?(?:passage|text|material|source|reading)[,:]?\s*(\w)/i, (_, letter) => letter.toUpperCase()).replace(/,?\s*(?:as\s+)?(?:according to|described in|mentioned in|stated in|based on|in) the (?:passage|text|material|source|reading|d2l (?:course )?material)\b/gi, '').replace(/\s+([?.!])/g, '$1').trim(); }
+function tidyQuestion(text) { return String(text || '').replace(/^\s*(?:According to|Based on) (?:the )?(?:passage|text|material|source|reading)[,:]?\s*(\w)/i, (_, letter) => letter.toUpperCase()).replace(/,?\s*(?:as\s+)?(?:according to|described in|mentioned in|stated in|based on|in) the (?:passage|text|material|source|reading|d2l (?:course )?material)\b/gi, '').replace(/,?\s*(?:based on|according to|from) the (?:information|details|facts) (?:provided|given)(?: (?:in the )?(?:material|passage|text|notes|source))?\b/gi, '').replace(/\s+([?.!])/g, '$1').trim(); }
 // A safety net behind the prompt: small models still sometimes ask about the file.
 function isAboutTheDocument(question) { return ABOUT_THE_DOCUMENT.test(String(question || '')); }
 const QUESTION_TYPES = ['multiple_choice', 'true_false', 'short_answer', 'fill_blank', 'application', 'scenario'];

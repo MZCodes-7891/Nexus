@@ -459,3 +459,77 @@ input[type="range"],input[type="checkbox"] { accent-color:var(--accent); }
 .phone-qr { display:flex;gap:16px;align-items:center;margin:12px 0;padding:12px;border:1px solid var(--border-color);border-radius:var(--radius); }
 .phone-qr img { width:160px;height:160px;border-radius:8px;background:#fff; }
 .phone-url { font-size:.8em;color:var(--text-dim);word-break:break-all; }
+
+.quiz-timer { color:var(--warn);font-size:1.1em; }
+.quiz-dot.answered { background:var(--accent); }
+.quiz-choice-button.picked { border-color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent); }
+
+/* Mistake notebook */
+.mistake { padding:12px 0;border-bottom:1px solid var(--border-color); }
+.mistake-answers { display:flex;flex-direction:column;gap:4px;margin:6px 0; }
+.mistake-wrong { color:var(--bad); }
+.mistake-right { color:var(--ok); }
+.mistake-group summary { cursor:pointer;margin-bottom:8px; }
+
+/* Coach */
+.coach-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px; }
+.coach-card { display:flex;flex-direction:column;gap:8px; }
+.coach-card textarea.field, .coach-card > input.field { width:100%; }
+.coach-field { display:flex;flex-direction:column;gap:2px; }
+.coach-big { display:flex;align-items:baseline;gap:10px; }
+.coach-big b { font-size:2.2em;color:var(--accent); }
+.coach-bars { display:flex;flex-direction:column;gap:4px; }
+.coach-bar-row { display:grid;grid-template-columns:34px 1fr 90px;gap:8px;align-items:center; }
+.coach-code { font-weight:600; }
+.coach-bar { height:9px;border-radius:99px;background:rgba(125,180,255,.12);overflow:hidden; }
+.coach-bar > div { height:100%;background:var(--accent);border-radius:99px; }
+.coach-bar.low > div { background:var(--bad); }
+.coach-bar.high > div { background:var(--ok); }
+.coach-list { margin:4px 0;padding-left:18px; }
+.coach-profile { border-left:3px solid var(--accent);padding-left:10px; }
+.coach-week { display:grid;grid-template-columns:repeat(7,1fr);gap:6px;height:90px;align-items:end; }
+.coach-day { display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px; }
+.coach-day-bar { width:70%;min-height:2px;background:var(--accent);border-radius:6px 6px 2px 2px; }
+.coach-plan { display:grid;gap:6px; }
+.coach-plan-day ul { margin:2px 0 0;padding-left:18px; }
+.coach-vocab { display:grid;gap:6px;max-height:260px;overflow:auto; }
+.coach-term { display:flex;flex-direction:column;padding:6px 8px;border:1px solid var(--border-color);border-radius:8px; }
+.coach-course summary { cursor:pointer; }
+.coach-course { display:block; }
+.coach-now { display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;text-align:left;padding:8px 10px;margin:4px 0;border:1px solid var(--border-color);border-radius:10px;background:transparent;color:inherit;cursor:pointer; }
+.coach-now:hover { border-color:var(--accent); }
+.coach-now.first { border-color:var(--accent);background:rgba(125,180,255,.08); }
+.coach-mixes { display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px; }
+.coach-kab { grid-template-columns:repeat(2,1fr); }
+
+/* My Day */
+.myday-card { grid-column:1 / -1; }
+.myday-head { display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px; }
+.myday-head h3 { margin:0; }
+.myday-head > .row { margin-left:auto; }
+.myday-progress { width:140px;height:8px;border-radius:99px;background:rgba(125,180,255,.12);overflow:hidden; }
+.myday-progress > div { height:100%;background:var(--ok); }
+.myday-list { display:flex;flex-direction:column;gap:4px;max-height:420px;overflow:auto; }
+.myday-block { display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;border:1px solid transparent;border-left:3px solid var(--border-color); }
+.myday-block.kind-assignment, .myday-block.kind-test { border-left-color:var(--warn); }
+.myday-block.kind-task, .myday-block.kind-study, .myday-block.kind-quran { border-left-color:var(--accent); }
+.myday-block.kind-school, .myday-block.kind-event, .myday-block.kind-routine, .myday-block.kind-prayer, .myday-block.kind-break { opacity:.75; }
+.myday-block.now { border-color:var(--accent);background:rgba(125,180,255,.08);opacity:1; }
+.myday-block.done .myday-title { text-decoration:line-through;color:var(--text-dim); }
+.myday-block.skipped { opacity:.45; }
+.myday-time { width:120px;flex:none;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:.9em; }
+.myday-icon { width:22px;text-align:center; }
+.myday-title { font-weight:600; }
+.myday-badge { font-size:.75em;padding:2px 8px;border-radius:99px;background:var(--accent);color:#04121f; }
+.myday-routine { display:flex;flex-direction:column;gap:6px; }
+.coach-steps { margin:4px 0;padding-left:20px;display:flex;flex-direction:column;gap:6px; }
+.coach-card h4 { margin:10px 0 4px; }
+
+/* Study Center sections */
+.study-groups { display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px; }
+.study-group { padding:9px 16px;border-radius:12px;border:1px solid var(--border-color);background:rgba(12,26,52,.6);color:inherit;font-weight:600;cursor:pointer;transition:border-color var(--speed),background var(--speed); }
+.study-group:hover { border-color:var(--accent); }
+.study-group.active { background:var(--accent);color:#04121f;border-color:var(--accent); }
+.study-subtabs { margin-bottom:14px; }
+.coach-grid.single { grid-template-columns:minmax(0,1fr);max-width:980px; }
+#study-tab-coach .home-card { display:flex;flex-direction:column;gap:6px; }

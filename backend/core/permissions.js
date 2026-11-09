@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { redact } = require('./logger');
@@ -64,7 +65,10 @@ function createFileGuard({ getSettings, dataDir, home = os.homedir(), env = proc
   function resolve(target) {
     const raw = expand(target).trim();
     if (!raw) throw new Error('A file or folder path is required.');
-    const full = path.resolve(path.isAbsolute(raw) ? raw : path.join(home, raw));
+    let full = path.resolve(path.isAbsolute(raw) ? raw : path.join(home, raw));
+    // The AI sometimes guesses the Windows user name in a path. A user folder that doesn't exist means this user's own.
+    const other = full.match(/^([a-z]:[\\/]users[\\/])([^\\/]+)([\\/].*)?$/i);
+    if (other && normalize(path.join(other[1], other[2])) !== normalize(home) && !fs.existsSync(path.join(other[1], other[2]))) full = path.join(home, other[3] || '');
     const reason = deniedReason(full);
     if (reason) throw new Error(reason);
     const allowed = roots().some(root => { const base = normalize(root); return normalize(full) === base || normalize(full).startsWith(`${base}${path.sep}`); });

@@ -3,7 +3,7 @@ const { JsonStore } = require('./store');
 const DEFAULTS = {
   general: { setupDone: false, userName: '', startPage: 'home', launchAtLogin: false, startMinimized: false, closeToTray: false, notifications: true, language: 'English', city: '', newsTopic: '', newsOn: false, autoUpdate: true, phoneNotifications: true, morningBriefing: true, briefingTime: '07:00', phonePage: false, stayAwake: true },
   appearance: { theme: 'navy', accent: '#38bdf8', fontFamily: 'Segoe UI', fontSize: 14, animations: true, sidebarCollapsed: false, sidebarSide: 'left', density: 'comfortable', chatWidth: 'normal', corners: 'rounded', glow: true, hiddenPages: [], pageOrder: [] },
-  ai: { provider: 'ollama', model: 'qwen2.5:latest', baseUrl: 'http://127.0.0.1:11434', openaiBaseUrl: 'http://127.0.0.1:1234/v1', temperature: 0.4, topP: 0.9, contextLength: 8192, maxOutputTokens: 0, toolMode: 'auto', maxAgentSteps: 8, autoStartOllama: true, embeddingModel: '' },
+  ai: { provider: 'ollama', model: 'qwen3:14b', baseUrl: 'http://127.0.0.1:11434', openaiBaseUrl: 'http://127.0.0.1:1234/v1', temperature: 0.4, topP: 0.9, contextLength: 8192, maxOutputTokens: 0, toolMode: 'auto', maxAgentSteps: 8, autoStartOllama: true, embeddingModel: '', visionModel: '' },
   voice: { inputDevice: '', voiceId: '', rate: 175, volume: 100, pitch: 0, spokenReplies: true, wakeWordEnabled: false, followUp: true, wakeWord: 'hey nexus', silenceSeconds: 1.2 },
   browser: { preferred: 'auto', researchHidden: true },
   smartHome: { url: '' },
